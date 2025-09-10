@@ -40,6 +40,15 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/bpo_servic
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB error:', err));
+require('dotenv').config();
+
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
 
 const clientSchema = new mongoose.Schema({
     businessName: String,
