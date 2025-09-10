@@ -42,13 +42,15 @@ mongoose.connect(MONGO_URI)
     .catch(err => console.error('❌ MongoDB error:', err));
 require('dotenv').config();
 
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
-});
+const globalAny = global; // to avoid TS complaints if any
+let transporter = globalAny.__mailer;
+if (!transporter) {
+    transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+    });
+    globalAny.__mailer = transporter;
+}
 
 const clientSchema = new mongoose.Schema({
     businessName: String,
@@ -171,11 +173,6 @@ const Client = mongoose.model('Client', clientSchema, 'clients');
 const Agreement = mongoose.model('Agreement', agreementSchema, 'agreements');
 const Summary = mongoose.model('Summary', summarySchema, 'summaries');
 
-/* ----------------------- mailer ----------------------- */
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-});
 
 /* ----------------------- utils ----------------------- */
 function dataUrlToBuffer(dataUrl) {
