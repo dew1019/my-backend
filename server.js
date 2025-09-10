@@ -1021,10 +1021,10 @@ app.get('/api/debug/agreements', async (req, res) => {
 app.post('/api/debug/graph-upload', async (req, res) => {
     try {
         // guardrails with clear error
-        if (!GRAPH_TENANT || !GRAPH_CLIENT || !GRAPH_SECRET || !DRIVE_ID) {
+        if (!GRAPH_TENANT || !GRAPH_CLIENT || !GRAPH_SECRET || !DRIVE_ID || !PUBLIC_WEB_URL) {
             return res.status(400).json({
                 message: 'Graph env missing',
-                details: { GRAPH_TENANT: !!GRAPH_TENANT, GRAPH_CLIENT: !!GRAPH_CLIENT, GRAPH_SECRET: !!GRAPH_SECRET, DRIVE_ID: !!DRIVE_ID }
+                details: { GRAPH_TENANT: !!GRAPH_TENANT, GRAPH_CLIENT: !!GRAPH_CLIENT, GRAPH_SECRET: !!GRAPH_SECRET, DRIVE_ID: !!DRIVE_ID,PUBLIC_WEB_URL:!!PUBLIC_WEB_URL }
             });
         }
 
