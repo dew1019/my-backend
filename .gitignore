@@ -37,3 +37,12 @@ client-*.json
 # We IGNORE generated PDFs, but we KEEP template PDFs:
 *.pdf
 !pdf-templates/*.pdf
+# keep ignoring generated PDFs & sensitive stuff
+node_modules/
+.env
+pdfs/
+signatures/
+# DO NOT ignore template PDFs
+# *.pdf        <-- remove this global rule if you have it
+# or negate it:
+!pdf-templates/*.pdf
