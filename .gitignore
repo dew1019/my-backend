@@ -1,41 +1,39 @@
+# Node / OS / tooling
 node_modules/
-.env
-.env.*
 logs/
 npm-debug.log*
 yarn-error.log*
 .DS_Store
-dist/
-build/
 coverage/
 tmp/
 .cache/
+
+# Build artifacts
+dist/
+build/
+
+# Hosting / runtimes
 .vercel/
 .render/
+
+# Puppeteer cache
 puppeteer/.local-chromium/
 **/chromium*/
-node_modules/
-puppeteer/.local-chromium/
-.env
-pdfs/
-signatures/
-*.pdf
-node_modules/
-puppeteer/.local-chromium/
-.env
-pdfs/
-signatures/
-*.pdf
-"client-470401-a7c23a81e43c.json" 
-"client-470401-a7c23a81e43c.json" 
-"client-470401-a7c23a81e43c.json" 
-# Ignore service account keys and secrets
-*.json
-.env
 
+# Local env
+.env
+.env.*
+.env.local
+
+# Generated runtime files you DON'T want in git
+pdfs/
+signatures/
+
+# ⚠️ DO NOT ignore all JSON globally (keeps package.json, etc.)
+# If you have secret JSON keys, ignore them explicitly:
 client-*.json
-.env
-node_modules/
-node_modules/
-.env
-.DS_Store
+
+# PDFs:
+# We IGNORE generated PDFs, but we KEEP template PDFs:
+*.pdf
+!pdf-templates/*.pdf
