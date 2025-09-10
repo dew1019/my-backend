@@ -15,18 +15,23 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const PORT = process.env.PORT || 5003;
 
-/* ----------------------- middleware ----------------------- */
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001')
-    .split(',').map(s => s.trim());
+const allowedOrigins = (process.env.CORS_ORIGINS ||
+    'http://localhost:3000,http://localhost:3001,https://theglobalbpo.vercel.app'
+).split(',').map(s => s.trim());
 
 app.use(cors({
-    origin: allowedOrigins,
+    origin(origin, cb) {
+        if (!origin) return cb(null, true);                 // allow curl/server-to-server
+        cb(null, allowedOrigins.includes(origin));          // browsers restricted to your list
+    },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,                                    // only if you need cookies/auth
     optionsSuccessStatus: 204
 }));
-app.use((req, res, next) => (req.method === 'OPTIONS' ? res.sendStatus(204) : next()));
+
 app.use(bodyParser.json({ limit: '25mb' }));
+
 
 /* ----------------------- storage paths ----------------------- */
 const ROOT_DIR = __dirname;
