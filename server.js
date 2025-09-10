@@ -477,8 +477,6 @@ function getDirectorSigSpec(template, directorIndex) {
 }
 
 
-
-/* ----------------------- Microsoft Graph helpers ----------------------- */
 /* ----------------------- Microsoft Graph helpers ----------------------- */
 const GRAPH_TENANT = (process.env.GRAPH_TENANT_ID || '').trim();
 const GRAPH_CLIENT = (process.env.GRAPH_CLIENT_ID || '').trim();
