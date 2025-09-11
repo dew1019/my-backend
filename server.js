@@ -1,4 +1,5 @@
-// server.js
+
+
 require('dotenv').config();
 
 const express = require('express');
@@ -11,7 +12,7 @@ const path = require('path');
 const axios = require('axios');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
-// Use this everywhere. Strip trailing slashes to avoid // in links.
+
 const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/,'');
 
 const app = express();
@@ -23,39 +24,38 @@ const allowedOrigins = (process.env.CORS_ORIGINS ||
 
 app.use(cors({
     origin(origin, cb) {
-        if (!origin) return cb(null, true);                 // allow curl/server-to-server
-        cb(null, allowedOrigins.includes(origin));          // browsers restricted to your list
+        if (!origin) return cb(null, true);
+        cb(null, allowedOrigins.includes(origin));
     },
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,                                    // only if you need cookies/auth
+    credentials: true,
     optionsSuccessStatus: 204
 }));
 
 app.use(bodyParser.json({ limit: '25mb' }));
 
-
-/* ----------------------- storage paths ----------------------- */
+// ------------------------- storage paths -------------------------
 const ROOT_DIR = __dirname;
 const PDF_DIR = path.join(ROOT_DIR, 'pdfs');
 const SIG_DIR = path.join(ROOT_DIR, 'signatures');
 const PDF_TEMPLATES_DIR = path.join(ROOT_DIR, 'pdf-templates');
 for (const d of [PDF_DIR, SIG_DIR, PDF_TEMPLATES_DIR]) if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 
-/* ----------------------- database ----------------------- */
+// ------------------------- database -------------------------
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/bpo_service_db';
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB error:', err));
-require('dotenv').config();
 
-const globalAny = global; // to avoid TS complaints if any
+const globalAny = global;
 let transporter = globalAny.__mailer;
 if (!transporter) {
-    transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-    });
+    transporter = nodemailer.createTransport(
+        process.env.MAIL_MODE === 'console'
+            ? { jsonTransport: true }
+            : { service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } }
+    );
     globalAny.__mailer = transporter;
 }
 
@@ -66,50 +66,44 @@ const clientSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
 });
 
-const directorSlotSchema = new mongoose.Schema(
-    {
-        label: String,
-        email: String, // optional
-        directorSignToken: String, // legacy name
-        signToken: String,         // new name
-        signatureImagePath: String,
-        signature: String,
-        signed: { type: Boolean, default: false },
-        signedDate: Date,
-        signedPdfPath: String,
-    },
-    { _id: false }
-);
+const directorSlotSchema = new mongoose.Schema({
+    label: String,
+    email: String,
+    directorSignToken: String,  // legacy name
+    signToken: String,          // new name
+    signatureImagePath: String,
+    signature: String,
+    signed: { type: Boolean, default: false },
+    signedDate: Date,
+    signedPdfPath: String,
+},{ _id: false });
 
-const agreementDocumentSchema = new mongoose.Schema(
-    {
-        name: String, // template name
-        draftPdfPath: String, // after prefill
-        clientSignedPdfPath: String, // after client sign
-        finalSignedPdfPath: String, // latest fully signed (compat)
-        clientSignatureImagePath: String,
+const agreementDocumentSchema = new mongoose.Schema({
+    name: String,
+    draftPdfPath: String,
+    clientSignedPdfPath: String,
+    finalSignedPdfPath: String,
+    clientSignatureImagePath: String,
 
-        // Legacy single-director fields (kept for compatibility)
-        directorSignatureImagePath: String,
-        directorSignToken: String,
-        directorSigned: { type: Boolean, default: false },
-        directorSignedDate: Date,
-        directorSignature: String,
+    // legacy single-director
+    directorSignatureImagePath: String,
+    directorSignToken: String,
+    directorSigned: { type: Boolean, default: false },
+    directorSignedDate: Date,
+    directorSignature: String,
 
-        // Client state
-        clientSignToken: String,
-        clientSigned: { type: Boolean, default: false },
-        clientSignedDate: Date,
-        clientSignature: String,
+    // client state
+    clientSignToken: String,
+    clientSigned: { type: Boolean, default: false },
+    clientSignedDate: Date,
+    clientSignature: String,
 
-        // NEW: N directors
-        directors: [directorSlotSchema],
-    },
-    { _id: false }
-);
+    // multi-director
+    directors: [directorSlotSchema],
+},{ _id: false });
 
 const agreementSchema = new mongoose.Schema({
-    // canonical fields (align your form -> these)
+    // canonical fields
     businessName: String,
     tradingName: String,
     clientFullName: String,
@@ -138,7 +132,7 @@ const agreementSchema = new mongoose.Schema({
     contractStartDate: String,
     JobType: String,
 
-    // generic business details used by other templates
+    // generic business details
     businessType: String,
     ACN: String,
     ABN: String,
@@ -175,13 +169,11 @@ const summarySchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
 });
 
-
 const Client = mongoose.model('Client', clientSchema, 'clients');
 const Agreement = mongoose.model('Agreement', agreementSchema, 'agreements');
 const Summary = mongoose.model('Summary', summarySchema, 'summaries');
 
-
-/* ----------------------- utils ----------------------- */
+// ------------------------- utils -------------------------
 function dataUrlToBuffer(dataUrl) {
     if (!dataUrl) return null;
     const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
@@ -189,11 +181,8 @@ function dataUrlToBuffer(dataUrl) {
 }
 const nowIso = () => new Date().toISOString();
 function nowLocal() {
-    try {
-        return new Date().toLocaleString('en-AU', { timeZone: process.env.TIMEZONE || 'Australia/Melbourne' });
-    } catch {
-        return new Date().toLocaleString();
-    }
+    try { return new Date().toLocaleString('en-AU', { timeZone: process.env.TIMEZONE || 'Australia/Melbourne' }); }
+    catch { return new Date().toLocaleString(); }
 }
 function safeFolderName(name = 'Client') {
     let s = (name || 'Client')
@@ -207,7 +196,7 @@ function safeFolderName(name = 'Client') {
     return s;
 }
 
-/* ----------------------- PDF helpers ----------------------- */
+// ------------------------- PDF helpers -------------------------
 function getSafePage(pdfDoc, wantedPage, label = 'page') {
     const count = pdfDoc.getPageCount();
     let idx;
@@ -256,12 +245,12 @@ async function drawFieldsOnPdf(templatePath, fieldMap, inputData, outPath) {
     }
 
     function drawOnePlacement(p, spec, value) {
-        const { size = 10, color = rgb(0, 0, 0), maxWidth, lineHeight = 1.2 } = spec;
+        const { size = 10, color = rgb(0,0,0), maxWidth, lineHeight = 1.2 } = spec;
         let { x, y } = spec;
         if (spec.origin === 'top-left') y = p.getHeight() - spec.y;
         if (maxWidth) {
             const lines = wrapLines(value, size, maxWidth);
-            lines.forEach((line, i) => p.drawText(line, { x, y: y - i * (size * lineHeight), size, font, color }));
+            lines.forEach((line, i) => p.drawText(line, { x, y: y - i*(size*lineHeight), size, font, color }));
         } else {
             p.drawText(value, { x, y, size, font, color });
         }
@@ -294,18 +283,18 @@ async function stampSignatureWithTime(inPath, signatureDataUrl, templateCoords, 
 
     p.drawImage(png, { x, y, width, height });
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    p.drawText(`${label}: ${nowLocal()}`, { x, y: y - 14, size: 10, font, color: rgb(0, 0, 0) });
+    p.drawText(`${label}: ${nowLocal()}`, { x, y: y - 14, size: 10, font, color: rgb(0,0,0) });
 
     fs.writeFileSync(outPath, await pdfDoc.save());
     return outPath;
 }
 
+// ------------------------- Templates -------------------------
 const TEMPLATES = [
     {
         name: 'ServiceAgreement',
         path: 'Engagement-letter.pdf',
         fieldMap: {
-            // FIXED: companyName defined once with two placements on p1
             companyName: [
                 { page: 1, x: 40,  y: 486, size: 11, origin: 'top-left' },
                 { page: 1, x: 110, y: 378, size: 11, origin: 'top-left' },
@@ -344,7 +333,6 @@ const TEMPLATES = [
         },
         clientSig:   { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
         directorSig: { page: 6, x: 338, y:  72, width: 150, height: 50, origin: 'top-left' },
-        // Optionally add directorSigs: [ {...}, {...} ] for fixed slots for two directors
     },
 
     {
@@ -352,10 +340,8 @@ const TEMPLATES = [
         path: 'guarantee-page.pdf',
         fieldMap: {
             businessName: { page: 1, x: 388, y: 616, size: 10, origin: 'top-left' },
-
             ACN: { page: 1, x: 101, y: 605, size: 10, origin: 'top-left' },
             ABN: { page: 1, x: 101, y: 563, size: 10, origin: 'top-left' },
-
             directorName: { page: 1, x: 384, y: 102, size: 10, origin: 'top-left' },
             submittedAt:  { page: 1, x: 338, y:  74, size: 10, origin: 'top-left' },
         },
@@ -394,10 +380,26 @@ const TEMPLATES = [
     },
 ];
 
-/* ----------------------- Template input (FULL mapping + aliases) ----------------------- */
+// ------------------------- Self-heal: rebuild missing draft -------------------------
+async function ensureDraftExists(agreement, doc) {
+    const template = TEMPLATES.find(t => t.name === doc.name);
+    if (!template) throw new Error(`Template not found for ${doc.name}`);
+
+    const templatePath = path.join(PDF_TEMPLATES_DIR, template.path);
+    const summary = await Summary.findOne({ email: agreement.email }).sort({ createdAt: -1 });
+    const input = buildTemplateInput(doc.name, agreement.toObject(), summary);
+
+    const outDraft = path.join(PDF_DIR, `rehydrated-${doc.name}-${Date.now()}.pdf`);
+    await drawFieldsOnPdf(templatePath, template.fieldMap, input, outDraft);
+
+    if (!doc.draftPdfPath) doc.draftPdfPath = outDraft;
+    await agreement.save();
+    return outDraft;
+}
+
+// ------------------------- Template input mapping -------------------------
 function buildTemplateInput(templateName, agreementData, summaryData) {
     const base = {
-        // Canonical fields saved in Agreement
         businessName:       agreementData.businessName || '',
         tradingName:        agreementData.tradingName || '',
         clientFullName:     agreementData.clientFullName || '',
@@ -422,7 +424,6 @@ function buildTemplateInput(templateName, agreementData, summaryData) {
         contractStart:      agreementData.contractStartDate || '',
         contractStartDate:  agreementData.contractStartDate || '',
 
-        // generic business details (used by other templates)
         businessType:       agreementData.businessType || '',
         ACN:                agreementData.ACN || '',
         ABN:                agreementData.ABN || '',
@@ -436,22 +437,22 @@ function buildTemplateInput(templateName, agreementData, summaryData) {
         submittedAt: new Date(agreementData.submittedAt || Date.now()).toLocaleString(),
     };
 
-    // Aliases used in fieldMaps
-    base.companyName     = base.businessName;
-    base.dearName        = base.businessName;
-    base.customerName    = base.businessName;
-    base.clientEmail     = base.email;
-    base.mobileNumber    = base.phone;
-    base.postCode        = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
-    base.p4CompanyName   = base.businessName;
-    base.servicesAssist  = base.mainService || '';
-    base.directorName    = base.nameOfDirector;
-    base.p5ClientName    = base.clientFullName;
-    base.p5OtherName     = base.directorName;
+    // aliases
+    base.companyName   = base.businessName;
+    base.dearName      = base.businessName;
+    base.customerName  = base.businessName;
+    base.clientEmail   = base.email;
+    base.mobileNumber  = base.phone;
+    base.postCode      = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
+    base.p4CompanyName = base.businessName;
+    base.servicesAssist= base.mainService || '';
+    base.directorName  = base.nameOfDirector;
+    base.p5ClientName  = base.clientFullName;
+    base.p5OtherName   = base.directorName;
 
-    const dateOnly       = base.submittedAt.split(',')[0];
-    base.p5Date1         = dateOnly;
-    base.p5Date2         = dateOnly;
+    const dateOnly = base.submittedAt.split(',')[0];
+    base.p5Date1 = dateOnly;
+    base.p5Date2 = dateOnly;
 
     base.guarantorCompany = base.businessName;
     base.guarantorACNABN  = base.ACN || base.ABN || base.acn_abn;
@@ -483,14 +484,14 @@ function getDirectorSigSpec(template, directorIndex) {
     return template.directorSig || template.director1Sig || null;
 }
 
-
-/* ----------------------- Microsoft Graph helpers ----------------------- */
+// ------------------------- Microsoft Graph (optional) -------------------------
 const GRAPH_TENANT = (process.env.GRAPH_TENANT_ID || '').trim();
 const GRAPH_CLIENT = (process.env.GRAPH_CLIENT_ID || '').trim();
 const GRAPH_SECRET = (process.env.GRAPH_CLIENT_SECRET || '').trim();
-const SITE_ID      = (process.env.GRAPH_SITE_ID || '').trim();     // optional
-const DRIVE_ID     = (process.env.GRAPH_DRIVE_ID || '').trim();    // required
+const SITE_ID      = (process.env.GRAPH_SITE_ID || '').trim();
+const DRIVE_ID     = (process.env.GRAPH_DRIVE_ID || '').trim();
 const SP_BASE_PATH = (process.env.SP_BASE_PATH || 'Agreements').replace(/^\/|\/$/g, '');
+
 app.get('/api/debug/graph-env', (req, res) => {
     res.json({
         GRAPH_TENANT_ID: Boolean(process.env.GRAPH_TENANT_ID),
@@ -501,23 +502,6 @@ app.get('/api/debug/graph-env', (req, res) => {
         SP_BASE_PATH: process.env.SP_BASE_PATH || 'Agreements'
     });
 });
-// Rebuild a draft from its template if the file is missing
-async function ensureDraftExists(agreement, doc) {
-    const template = TEMPLATES.find(t => t.name === doc.name);
-    if (!template) throw new Error(`Template not found for ${doc.name}`);
-
-    const templatePath = path.join(PDF_TEMPLATES_DIR, template.path);
-    const summary = await Summary.findOne({ email: agreement.email }).sort({ createdAt: -1 });
-    const input = buildTemplateInput(doc.name, agreement.toObject(), summary);
-
-    const outDraft = path.join(PDF_DIR, `rehydrated-${doc.name}-${Date.now()}.pdf`);
-    await drawFieldsOnPdf(templatePath, template.fieldMap, input, outDraft);
-
-    // Persist so later calls don’t need to rebuild again
-    if (!doc.draftPdfPath) doc.draftPdfPath = outDraft;
-    await agreement.save();
-    return outDraft;
-}
 
 async function getAppToken() {
     const url = `https://login.microsoftonline.com/${GRAPH_TENANT}/oauth2/v2.0/token`;
@@ -539,7 +523,6 @@ async function graphRequest(token, method, url, data, headers = {}) {
     });
 }
 
-// Create each folder segment if missing
 async function ensureFolderPath(token, driveId, segments) {
     let currentPath = '';
     for (const seg of segments) {
@@ -548,7 +531,6 @@ async function ensureFolderPath(token, driveId, segments) {
             await graphRequest(token, 'GET', `/drives/${driveId}/root:/${encodeURIComponent(currentPath)}`);
         } catch (e) {
             if (e?.response?.status !== 404) throw e;
-            // create under parent
             const parentPath = currentPath.split('/').slice(0, -1).join('/');
             const parentUrl = parentPath
                 ? `/drives/${driveId}/root:/${encodeURIComponent(parentPath)}:/children`
@@ -558,16 +540,13 @@ async function ensureFolderPath(token, driveId, segments) {
             });
         }
     }
-    return currentPath; // final path
+    return currentPath;
 }
 
-// Small (<4MB) upload
 async function uploadSmall(token, driveId, fullPath, fileBuffer) {
     const url = `/drives/${driveId}/root:/${encodeURIComponent(fullPath)}:/content`;
     await graphRequest(token, 'PUT', url, fileBuffer, { 'Content-Type': 'application/octet-stream' });
 }
-
-// Large upload via session (chunked)
 async function uploadLarge(token, driveId, fullPath, filePath) {
     const session = await graphRequest(
         token, 'POST',
@@ -620,19 +599,15 @@ async function uploadAgreementToSharePoint(agreement) {
     }
     const token = await getAppToken();
 
-    // Build folder path: Agreements/<Safe Client Name> (customize as you like)
     const clientFolder = safeFolderName(agreement.businessName || 'Client');
     const segments = [SP_BASE_PATH, clientFolder].filter(Boolean);
     const folderPath = await ensureFolderPath(token, DRIVE_ID, segments);
 
-    // Upload final PDFs
     for (const d of agreement.documents || []) {
         if (d.finalSignedPdfPath && fs.existsSync(d.finalSignedPdfPath)) {
             await uploadFile(token, DRIVE_ID, folderPath, d.finalSignedPdfPath);
         }
     }
-
-    // Upload signatures (client + directors)
     for (const d of agreement.documents || []) {
         if (d.clientSignatureImagePath && fs.existsSync(d.clientSignatureImagePath)) {
             await uploadFile(token, DRIVE_ID, folderPath, d.clientSignatureImagePath);
@@ -643,33 +618,45 @@ async function uploadAgreementToSharePoint(agreement) {
             }
         }
     }
-
     console.log(`✅ Uploaded final PDFs & signatures to SharePoint: /${folderPath}`);
 }
 
-/* ----------------------- helpers ----------------------- */
+// ------------------------- helpers -------------------------
 function getDirectorEmails() {
     const multi = (process.env.DIRECTOR_EMAILS || '')
         .split(',').map(s => s.trim()).filter(Boolean);
     if (multi.length) return multi;
     return (process.env.DIRECTOR_EMAIL ? [process.env.DIRECTOR_EMAIL] : []);
 }
+
+async function safeSendMail(opts) {
+    try {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.MAIL_MODE === 'console') {
+            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
+            return;
+        }
+        await transporter.sendMail(opts);
+    } catch (err) {
+        console.error('✉️  Mail send failed (non-fatal):', err?.message || err);
+    }
+}
+
+// ------------------------- routes -------------------------
+
 app.post('/api/new-client-login', async (req, res) => {
     const { businessName, email, phone } = req.body;
     try {
         await new Client({ businessName, email, phone }).save();
 
-        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-            await transporter.sendMail({
-                from: process.env.EMAIL_USER,
-                to: process.env.EMAIL_USER,
-                subject: '🚀 New Client Logged In',
-                text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
-            });
-        }
+        await safeSendMail({
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER,
+            subject: '🚀 New Client Logged In',
+            text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
+        });
 
         if (process.env.AGREEMENTS_INBOX) {
-            await transporter.sendMail({
+            await safeSendMail({
                 from: process.env.EMAIL_USER,
                 to: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][NEW-CLIENT] ${businessName}`,
@@ -684,9 +671,7 @@ app.post('/api/new-client-login', async (req, res) => {
     }
 });
 
-/* ----------------------- routes (trimmed to the essential flow) ----------------------- */
-
-// (Tiny helper)
+// Tiny helper for the signing UI header
 app.get('/api/sign/session/:token', async (req, res) => {
     try {
         const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
@@ -710,11 +695,9 @@ app.post('/api/save-pricing-summary', async (req, res) => {
     }
 });
 
-// Prefill pack & email client links (FULL field mapping)
+// Prefill the full pack and email client links
 app.post('/api/submit-agreement', async (req, res) => {
     const b = req.body;
-
-    // Minimal guard
     const businessName   = b.CompanyName ?? b.businessName;
     const clientFullName = b.ClientFullName ?? b.clientFullName;
     const email          = b.ClientEmail ?? b.email;
@@ -724,7 +707,6 @@ app.post('/api/submit-agreement', async (req, res) => {
         return res.status(400).json({ message: 'Missing required fields (businessName, clientFullName, email, phone).' });
 
     try {
-        // Derive ACN/ABN if a single field used
         const idDigits = String(b.ACN_ABN || '').replace(/\D/g, '');
         const ACN = idDigits.length === 9  ? idDigits : (b.ACN || '');
         const ABN = idDigits.length === 11 ? idDigits : (b.ABN || '');
@@ -737,7 +719,6 @@ app.post('/api/submit-agreement', async (req, res) => {
             email,
             phone,
 
-            // addresses
             registeredOffice:   b.RegisteredOffice ?? b.registeredOffice ?? '',
             registeredPostCode: b.RegisteredPostCode ?? b.registeredPostCode ?? '',
             postalAddress:      b.PostalAddress ?? b.postalAddress ?? '',
@@ -745,27 +726,22 @@ app.post('/api/submit-agreement', async (req, res) => {
             businessAddress:    b.BusinessAddress ?? b.businessAddress ?? '',
             businessPostCode:   b.BusinessPostCode ?? b.businessPostCode ?? '',
 
-            // department
             departmentContact:  b.DepartmentContact ?? b.departmentContact ?? '',
             contactNumber:      b.ContactNumber ?? b.contactNumber ?? '',
             departmentEmail:    b.DepartmentEmail ?? b.departmentEmail ?? '',
             officeNumber:       b.OfficeNumber ?? b.officeNumber ?? '',
 
-            // director & ID
             nameOfDirector:     b.NameOfDirector ?? b.nameOfDirector ?? '',
             addressOfDirector:  b.AddressOfDirector ?? b.addressOfDirector ?? '',
             driversLicense:     b.DriversLicense ?? b.driversLicense ?? '',
 
-            // company numbers
             acn_abn:            b.ACN_ABN ?? `${b.ACN || ''}${b.ABN ? ' / ' + b.ABN : ''}`,
             ACN, ABN,
 
-            // agreement
             mainService:        b.MainService ?? b.mainService ?? '',
             contractStartDate:  b.ContractStartDate ?? b.contractStartDate ?? '',
             JobType:            b.JobType ?? b.jobType ?? '',
 
-            // optional generic business details
             businessType:       b.businessType ?? '',
             address:            b.address ?? '',
             city:               b.city ?? '',
@@ -799,8 +775,9 @@ app.post('/api/submit-agreement', async (req, res) => {
                 clientSigned: false,
                 directorSigned: false,
                 clientSignToken,
-                directors: [], // filled at director stage
+                directors: [],
             });
+
             signLinks.push(`• ${t.name}: ${PUBLIC_WEB_URL}/sign/${clientSignToken}`);
         }
 
@@ -821,63 +798,36 @@ app.post('/api/submit-agreement', async (req, res) => {
             attachments,
         });
 
-        res.status(200).json({
-            message: 'Agreement saved, drafts generated.',
-            signLinks, // <-- this will be https://theglobalbpo.vercel.app/sign/<token>
-        });
+        res.status(200).json({ message: 'Agreement saved, drafts generated.', signLinks });
     } catch (e) {
         console.error('❌ Error saving agreement:', e);
         res.status(500).json({ message: 'Failed to save and send agreement.' });
     }
 });
 
-// Replace your /api/sign/preview route with this "self-healing" version.
+// Self-healing PDF preview
 app.get('/api/sign/preview/:token', async (req, res) => {
     try {
         const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
         const ag = await Agreement.findById(decoded.agid);
         if (!ag) return res.status(404).send('Agreement not found');
 
-        // Find the doc this token is for
-        const doc = decoded.docName
-            ? ag.documents.find(d => d.name === decoded.docName)
-            : ag.documents[0];
+        const doc = decoded.docName ? ag.documents.find(d => d.name === decoded.docName) : ag.documents[0];
         if (!doc) return res.status(404).send('Document not found');
 
-        // Preferred file depending on role
         let filePath = (decoded.role === 'client')
             ? (doc.clientSignedPdfPath || doc.draftPdfPath || doc.finalSignedPdfPath)
             : (doc.finalSignedPdfPath || doc.clientSignedPdfPath || doc.draftPdfPath);
 
-        // 👇 Self-heal: if the file is missing, rebuild the draft from template
         if (!filePath || !fs.existsSync(filePath)) {
-            const template = TEMPLATES.find(t => t.name === doc.name);
-            if (!template) return res.status(500).send(`Template not found for ${doc.name}`);
-
-            const templatePath = path.join(PDF_TEMPLATES_DIR, template.path);
-
-            // If you want the PricingSchedule fields, grab the latest Summary for this email
-            const summary = await Summary.findOne({ email: ag.email }).sort({ createdAt: -1 });
-
-            // Build the input used when you first created the pack
-            const input = buildTemplateInput(doc.name, ag.toObject(), summary);
-
-            // Rebuild a fresh draft into /pdfs and update doc
-            const outDraft = path.join(PDF_DIR, `rehydrated-${doc.name}-${Date.now()}.pdf`);
-            await drawFieldsOnPdf(templatePath, template.fieldMap, input, outDraft);
-
-            // Persist so subsequent previews don’t have to rebuild again
-            doc.draftPdfPath = doc.draftPdfPath || outDraft;
-            await ag.save();
-
-            filePath = outDraft;
+            filePath = await ensureDraftExists(ag, doc);
         }
 
         res.setHeader('Content-Type', 'application/pdf');
-        return fs.createReadStream(filePath).pipe(res);
+        fs.createReadStream(filePath).pipe(res);
     } catch (e) {
         console.error('preview error:', e);
-        return res.status(404).send('PDF not found');
+        res.status(404).send('PDF not found');
     }
 });
 
@@ -899,13 +849,13 @@ app.post('/api/sign/:token', async (req, res) => {
         const template = TEMPLATES.find(t => t.name === doc.name);
         if (!template) return res.status(500).json({ message: `Template not found for ${doc.name}` });
 
-        // 👇 try to use saved draft, otherwise rebuild it
         let inFile = doc.draftPdfPath;
         if (!inFile || !fs.existsSync(inFile)) {
-            inFile = await ensureDraftExists(ag, doc);  // self-heal after Railway/Vercel restart
+            inFile = await ensureDraftExists(ag, doc);
             doc.draftPdfPath = inFile;
             await ag.save();
         }
+
         const ts = nowIso().replace(/[:.]/g, '-');
         const safeBusiness = safeFolderName(ag.businessName || 'Client');
 
@@ -933,7 +883,7 @@ app.post('/api/sign/:token', async (req, res) => {
             return res.status(200).json({ nextDocToken: nextToken });
         }
 
-        // All client docs done → create director links & email each director
+        // All client docs done -> prepare director links & email
         const directorEmails = getDirectorEmails();
         for (const d of ag.documents) {
             d.directors = directorEmails.map((email, idx) => ({
@@ -952,7 +902,7 @@ app.post('/api/sign/:token', async (req, res) => {
         for (let i = 0; i < directorEmails.length; i++) {
             const email = directorEmails[i];
             const directorLinks = ag.documents.map(
-                d =>  `• ${d.name}: ${PUBLIC_WEB_URL}/sign-director/${encodeURIComponent(d.directors[i].directorSignToken)}`
+                d => `• ${d.name}: ${PUBLIC_WEB_URL}/sign-director/${encodeURIComponent(d.directors[i].directorSignToken)}`
             );
             const attachments = ag.documents
                 .filter(d => d.clientSignedPdfPath && fs.existsSync(d.clientSignedPdfPath))
@@ -967,11 +917,22 @@ app.post('/api/sign/:token', async (req, res) => {
                 attachments
             });
         }
-        return res.status(200).json({ complete: true });
+
+        res.status(200).json({ complete: true });
     } catch (e) {
         console.error('Client sign error:', e);
-        return res.status(500).json({ message: e.message || 'Failed to sign document.' });
+        res.status(500).json({ message: e.message || 'Failed to sign document.' });
     }
+});
+
+// Debug: what director emails are parsed?
+app.get('/api/debug/directors-env', (req, res) => {
+    res.json({
+        DIRECTOR_EMAILS: process.env.DIRECTOR_EMAILS || null,
+        DIRECTOR_EMAIL: process.env.DIRECTOR_EMAIL || null,
+        parsed: (process.env.DIRECTOR_EMAILS || '')
+            .split(',').map(s => s.trim()).filter(Boolean)
+    });
 });
 
 // Director signs a document
@@ -1022,7 +983,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
         doc.finalSignedPdfPath = outFile;
         await ag.save();
 
-        // Same director → next doc?
+        // same director -> next doc
         const nextDoc = ag.documents.find(d =>
             d.clientSigned && d.directors && d.directors[directorIndex] && !d.directors[directorIndex].signed
         );
@@ -1037,14 +998,14 @@ app.post('/api/sign-director/:token', async (req, res) => {
             return res.status(200).json({ nextDocToken: nextDoc.directors[directorIndex].directorSignToken });
         }
 
-        // All directors for all docs?
+        // all done?
         const allDirectorsComplete = ag.documents.every(d =>
             d.clientSigned && d.directors && d.directors.length && d.directors.every(x => x.signed)
         );
 
         if (allDirectorsComplete) {
             const attachments = ag.documents.map(d => ({ filename: `Final_${d.name}.pdf`, path: d.finalSignedPdfPath }));
-            await transporter.sendMail({
+            await safeSendMail({
                 from: process.env.EMAIL_USER,
                 to: ag.email,
                 bcc: [...getDirectorEmails(), process.env.AGREEMENTS_INBOX].filter(Boolean).join(','),
@@ -1057,36 +1018,39 @@ app.post('/api/sign-director/:token', async (req, res) => {
             ag.directorSignedDate = new Date();
             await ag.save();
 
-            // 🔗 Upload to SharePoint via Microsoft Graph (app-only)
-            try {
-                await uploadAgreementToSharePoint(ag);
-            } catch (e) {
-                console.error('⚠️ SharePoint upload failed:', e?.response?.data || e.message || e);
-            }
+            try { await uploadAgreementToSharePoint(ag); }
+            catch (e) { console.error('⚠️ SharePoint upload failed:', e?.response?.data || e.message || e); }
 
             return res.status(200).json({ complete: true });
         }
-        return res.status(200).json({ done: true });
+
+        res.status(200).json({ done: true });
     } catch (e) {
         console.error('Director sign error:', e);
         res.status(500).json({ message: e.message || 'Failed to sign document.' });
     }
 });
+
+// ------------------------- Debug endpoints -------------------------
 app.get('/api/debug/agreements', async (req, res) => {
     const ags = await Agreement.find().lean();
     res.json(ags);
 });
 app.post('/api/debug/graph-upload', async (req, res) => {
     try {
-        // guardrails with clear error
         if (!GRAPH_TENANT || !GRAPH_CLIENT || !GRAPH_SECRET || !DRIVE_ID || !PUBLIC_WEB_URL) {
             return res.status(400).json({
                 message: 'Graph env missing',
-                details: { GRAPH_TENANT: !!GRAPH_TENANT, GRAPH_CLIENT: !!GRAPH_CLIENT, GRAPH_SECRET: !!GRAPH_SECRET, DRIVE_ID: !!DRIVE_ID,PUBLIC_WEB_URL:!!PUBLIC_WEB_URL }
+                details: {
+                    GRAPH_TENANT: !!GRAPH_TENANT,
+                    GRAPH_CLIENT: !!GRAPH_CLIENT,
+                    GRAPH_SECRET: !!GRAPH_SECRET,
+                    DRIVE_ID: !!DRIVE_ID,
+                    PUBLIC_WEB_URL: !!PUBLIC_WEB_URL
+                }
             });
         }
-
-        const token = await getAppToken(); // uses GRAPH_TENANT/CLIENT/SECRET
+        const token = await getAppToken();
         const folder = await ensureFolderPath(token, DRIVE_ID, [SP_BASE_PATH, 'TestClient']);
         await uploadSmall(token, DRIVE_ID, `${folder}/test.txt`, Buffer.from('Hello from Postman!'));
         res.json({ message: 'Uploaded test.txt to SharePoint', folder: `/${folder}` });
@@ -1095,26 +1059,15 @@ app.post('/api/debug/graph-upload', async (req, res) => {
         res.status(500).json({ message: 'Graph upload failed', error: e?.response?.data || e.message || String(e) });
     }
 });
-// DEBUG: see what the server *actually* sees
 app.get('/api/debug/app-env', (req, res) => {
     const pub = (process.env.PUBLIC_WEB_URL || '').toString();
     const cors = (process.env.CORS_ORIGINS || '').toString();
     res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
 });
-async function safeSendMail(opts) {
-    try {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.MAIL_MODE === 'console') {
-            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
-            return;
-        }
-        await transporter.sendMail(opts);
-    } catch (err) {
-        console.error('✉️  Mail send failed (non-fatal):', err?.message || err);
-    }
-}
 
-app.get("/", (req, res) => {
-    res.send("Backend is live 🚀");
+// ------------------------- Root & start -------------------------
+app.get('/', (req, res) => {
+    res.send('Backend is live 🚀');
 });
-/* ----------------------- start ----------------------- */
+
 app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
