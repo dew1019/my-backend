@@ -805,8 +805,8 @@ app.post('/api/submit-agreement', async (req, res) => {
         });
 
         res.status(200).json({
-              message: 'Agreement saved, drafts generated, and sign links sent.',
-              links: signLinks
+            message: 'Agreement saved, drafts generated.',
+            signLinks, // <-- this will be https://theglobalbpo.vercel.app/sign/<token>
         });
     } catch (e) {
         console.error('❌ Error saving agreement:', e);
@@ -1048,6 +1048,17 @@ app.get('/api/debug/app-env', (req, res) => {
     const cors = (process.env.CORS_ORIGINS || '').toString();
     res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
 });
+async function safeSendMail(opts) {
+    try {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.MAIL_MODE === 'console') {
+            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
+            return;
+        }
+        await transporter.sendMail(opts);
+    } catch (err) {
+        console.error('✉️  Mail send failed (non-fatal):', err?.message || err);
+    }
+}
 
 app.get("/", (req, res) => {
     res.send("Backend is live 🚀");
