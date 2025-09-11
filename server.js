@@ -1,4 +1,5 @@
-// server.js
+
+
 require('dotenv').config();
 
 const express = require('express');
@@ -12,7 +13,8 @@ const axios = require('axios');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
 
-const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/, '');
+const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/,'');
+
 const app = express();
 const PORT = process.env.PORT || 5003;
 
@@ -33,74 +35,95 @@ app.use(cors({
 
 app.use(bodyParser.json({ limit: '25mb' }));
 
-/* ----------------------- storage paths ----------------------- */
+// ------------------------- storage paths -------------------------
 const ROOT_DIR = __dirname;
 const PDF_DIR = path.join(ROOT_DIR, 'pdfs');
 const SIG_DIR = path.join(ROOT_DIR, 'signatures');
 const PDF_TEMPLATES_DIR = path.join(ROOT_DIR, 'pdf-templates');
 for (const d of [PDF_DIR, SIG_DIR, PDF_TEMPLATES_DIR]) if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 
-/* ----------------------- database ----------------------- */
+// ------------------------- database -------------------------
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/bpo_service_db';
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB error:', err));
 
-/* ----------------------- mail (Gmail SMTP) ----------------------- */
-/**
- * Force real Gmail SMTP (no console mode). If your platform blocks SMTP,
- * verify() will throw here on boot, telling you immediately.
- *
- * Use an App Password if your Gmail has 2FA (recommended).
- */
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
-const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
-const SMTP_SECURE = String(process.env.SMTP_SECURE ?? (SMTP_PORT === 465)).toLowerCase() === 'true';
+// ------------------------- mail transport -------------------------
+const globalAny = global;
 
-if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    console.error('❌ EMAIL_USER/EMAIL_PASS missing. Set them in your environment.');
-}
+// Helper: build transport from env
+function createTransportFromEnv() {
+    const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
 
-const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_SECURE,        // true: 465 TLS, false: 587 (STARTTLS upgrade)
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-    // keep-alive & timeouts so it fails fast rather than hanging
-    pool: true,
-    maxConnections: 3,
-    maxMessages: 100,
-    connectionTimeout: 15000,   // 15s
-    greetingTimeout: 10000,     // 10s
-    socketTimeout: 20000,       // 20s
-});
-
-(async () => {
-    try {
-        await transporter.verify();
-        console.log(`✉️  Gmail SMTP ready via ${SMTP_HOST}:${SMTP_PORT} (secure=${SMTP_SECURE})`);
-    } catch (err) {
-        console.error('✉️  Mail send failed (timeout/blocked):', err?.message || err);
-        console.error('💡 Hint: If your host blocks SMTP 465/587, use a relay (Mailgun/SendGrid) or move hosts.');
+    if (mode === 'console') {
+        console.log('✉️  MAIL_MODE=console — emails will be logged, not sent.');
+        return nodemailer.createTransport({ jsonTransport: true });
     }
-})();
 
-async function safeSendMail(opts) {
-    try {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-            console.log('✉️  [missing creds] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
-            return;
+    if (mode === 'smtp') {
+        const host   = process.env.SMTP_HOST;         // e.g. smtp.sendgrid.net
+        const port   = Number(process.env.SMTP_PORT); // e.g. 587
+        const secure = port === 465;                  // 465 = TLS, 587 = STARTTLS
+        const user   = process.env.SMTP_USER;         // e.g. "apikey" for SendGrid
+        const pass   = process.env.SMTP_PASS;         // your SendGrid API key
+
+        if (!host || !port || !user || !pass) {
+            console.warn('✉️  MAIL_MODE=smtp but SMTP_* vars missing. Falling back to console.');
+            return nodemailer.createTransport({ jsonTransport: true });
         }
-        await transporter.sendMail({ ...opts, from: opts.from || process.env.EMAIL_USER });
-    } catch (err) {
-        console.error('✉️  Mail send failed:', err?.message || err);
+
+        const timeout = Number(process.env.MAIL_TIMEOUT || 12000); // 12s default
+
+        console.log(`✉️  MAIL_MODE=smtp → ${host}:${port} secure=${secure}`);
+        return nodemailer.createTransport({
+            host,
+            port,
+            secure,
+            auth: { user, pass },
+            pool: true,
+            maxConnections: 3,
+            maxMessages: 50,
+            // timeouts (avoid hanging containers)
+            connectionTimeout: timeout,
+            greetingTimeout: timeout,
+            socketTimeout: timeout,
+        });
     }
+
+    if (mode === 'gmail') {
+        // Use ONLY if you have a Gmail App Password (not your normal password)
+        const user = process.env.EMAIL_USER;
+        const pass = process.env.EMAIL_PASS;
+        if (!user || !pass) {
+            console.warn('✉️  MAIL_MODE=gmail but EMAIL_USER/EMAIL_PASS missing. Falling back to console.');
+            return nodemailer.createTransport({ jsonTransport: true });
+        }
+        const timeout = Number(process.env.MAIL_TIMEOUT || 12000);
+        console.log('✉️  MAIL_MODE=gmail (gmail SMTP via service)');
+        return nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user, pass },
+            pool: true,
+            maxConnections: 2,
+            connectionTimeout: timeout,
+            greetingTimeout: timeout,
+            socketTimeout: timeout,
+        });
+    }
+
+    console.warn(`✉️  Unknown MAIL_MODE=${mode}. Falling back to console.`);
+    return nodemailer.createTransport({ jsonTransport: true });
 }
 
-/* ----------------------- schemas ----------------------- */
+let transporter = globalAny.__mailer;
+if (!transporter) {
+    transporter = createTransportFromEnv();
+    globalAny.__mailer = transporter;
+}
+
+
+
+
 const clientSchema = new mongoose.Schema({
     businessName: String,
     email: String,
@@ -111,14 +134,14 @@ const clientSchema = new mongoose.Schema({
 const directorSlotSchema = new mongoose.Schema({
     label: String,
     email: String,
-    directorSignToken: String, // legacy
-    signToken: String,         // new
+    directorSignToken: String,  // legacy name
+    signToken: String,          // new name
     signatureImagePath: String,
     signature: String,
     signed: { type: Boolean, default: false },
     signedDate: Date,
     signedPdfPath: String,
-}, { _id: false });
+},{ _id: false });
 
 const agreementDocumentSchema = new mongoose.Schema({
     name: String,
@@ -127,7 +150,7 @@ const agreementDocumentSchema = new mongoose.Schema({
     finalSignedPdfPath: String,
     clientSignatureImagePath: String,
 
-    // legacy single-director fields
+    // legacy single-director
     directorSignatureImagePath: String,
     directorSignToken: String,
     directorSigned: { type: Boolean, default: false },
@@ -142,9 +165,10 @@ const agreementDocumentSchema = new mongoose.Schema({
 
     // multi-director
     directors: [directorSlotSchema],
-}, { _id: false });
+},{ _id: false });
 
 const agreementSchema = new mongoose.Schema({
+    // canonical fields
     businessName: String,
     tradingName: String,
     clientFullName: String,
@@ -214,7 +238,7 @@ const Client = mongoose.model('Client', clientSchema, 'clients');
 const Agreement = mongoose.model('Agreement', agreementSchema, 'agreements');
 const Summary = mongoose.model('Summary', summarySchema, 'summaries');
 
-/* ----------------------- utils ----------------------- */
+// ------------------------- utils -------------------------
 function dataUrlToBuffer(dataUrl) {
     if (!dataUrl) return null;
     const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
@@ -222,21 +246,22 @@ function dataUrlToBuffer(dataUrl) {
 }
 const nowIso = () => new Date().toISOString();
 function nowLocal() {
-    try {
-        return new Date().toLocaleString('en-AU', { timeZone: process.env.TIMEZONE || 'Australia/Melbourne' });
-    } catch {
-        return new Date().toLocaleString();
-    }
+    try { return new Date().toLocaleString('en-AU', { timeZone: process.env.TIMEZONE || 'Australia/Melbourne' }); }
+    catch { return new Date().toLocaleString(); }
 }
 function safeFolderName(name = 'Client') {
-    let s = (name || 'Client').normalize('NFKD').replace(/[^\w\-]/g, ' ').replace(/\s+/g, ' ').trim();
+    let s = (name || 'Client')
+        .normalize('NFKD')
+        .replace(/[^\w\-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
     s = s.replace(/[.#]+$/g, '').replace(/^\.+/g, '');
     if (!s || s.toLowerCase() === 'forms') s = 'Client';
     if (s.length > 100) s = s.slice(0, 100).trim();
     return s;
 }
 
-/* ----------------------- PDF helpers ----------------------- */
+// ------------------------- PDF helpers -------------------------
 function getSafePage(pdfDoc, wantedPage, label = 'page') {
     const count = pdfDoc.getPageCount();
     let idx;
@@ -285,12 +310,12 @@ async function drawFieldsOnPdf(templatePath, fieldMap, inputData, outPath) {
     }
 
     function drawOnePlacement(p, spec, value) {
-        const { size = 10, color = rgb(0, 0, 0), maxWidth, lineHeight = 1.2 } = spec;
+        const { size = 10, color = rgb(0,0,0), maxWidth, lineHeight = 1.2 } = spec;
         let { x, y } = spec;
         if (spec.origin === 'top-left') y = p.getHeight() - spec.y;
         if (maxWidth) {
             const lines = wrapLines(value, size, maxWidth);
-            lines.forEach((line, i) => p.drawText(line, { x, y: y - i * (size * lineHeight), size, font, color }));
+            lines.forEach((line, i) => p.drawText(line, { x, y: y - i*(size*lineHeight), size, font, color }));
         } else {
             p.drawText(value, { x, y, size, font, color });
         }
@@ -323,57 +348,58 @@ async function stampSignatureWithTime(inPath, signatureDataUrl, templateCoords, 
 
     p.drawImage(png, { x, y, width, height });
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    p.drawText(`${label}: ${nowLocal()}`, { x, y: y - 14, size: 10, font, color: rgb(0, 0, 0) });
+    p.drawText(`${label}: ${nowLocal()}`, { x, y: y - 14, size: 10, font, color: rgb(0,0,0) });
 
     fs.writeFileSync(outPath, await pdfDoc.save());
     return outPath;
 }
 
-/* ----------------------- templates ----------------------- */
+// ------------------------- Templates -------------------------
 const TEMPLATES = [
     {
         name: 'ServiceAgreement',
         path: 'Engagement-letter.pdf',
         fieldMap: {
             companyName: [
-                { page: 1, x: 40, y: 486, size: 11, origin: 'top-left' },
+                { page: 1, x: 40,  y: 486, size: 11, origin: 'top-left' },
                 { page: 1, x: 110, y: 378, size: 11, origin: 'top-left' },
             ],
-            addressLine1: { page: 1, x: 41, y: 463, size: 10, origin: 'top-left' },
+            addressLine1: { page: 1, x: 41,   y: 463, size: 10, origin: 'top-left' },
             addressLine2: { page: 1, x: 41.5, y: 440, size: 10, origin: 'top-left' },
 
-            businessName: { page: 2, x: 171, y: 563, size: 10, origin: 'top-left' },
-            clientFullName: { page: 2, x: 171, y: 484, size: 10, origin: 'top-left' },
-            clientEmail: { page: 2, x: 169, y: 450, size: 10, origin: 'top-left', maxWidth: 260 },
-            registeredOffice: { page: 2, x: 171, y: 395, size: 10, origin: 'top-left' },
-            postalAddress: { page: 2, x: 171, y: 347, size: 10, origin: 'top-left' },
-            businessAddress: { page: 2, x: 171, y: 297, size: 10, origin: 'top-left' },
+            businessName:      { page: 2, x: 171, y: 563, size: 10, origin: 'top-left' },
+            clientFullName:    { page: 2, x: 171, y: 484, size: 10, origin: 'top-left' },
+            clientEmail:       { page: 2, x: 169, y: 450, size: 10, origin: 'top-left', maxWidth: 260 },
+            registeredOffice:  { page: 2, x: 171, y: 395, size: 10, origin: 'top-left' },
+            postalAddress:     { page: 2, x: 171, y: 347, size: 10, origin: 'top-left' },
+            businessAddress:   { page: 2, x: 171, y: 297, size: 10, origin: 'top-left' },
             departmentContact: { page: 2, x: 171, y: 259, size: 10, origin: 'top-left' },
-            directorName: { page: 2, x: 171, y: 217, size: 10, origin: 'top-left' },
+            directorName:      { page: 2, x: 171, y: 217, size: 10, origin: 'top-left' },
 
-            ACN: { page: 2, x: 405, y: 566, size: 10, origin: 'top-left' },
-            ABN: { page: 2, x: 405, y: 521, size: 10, origin: 'top-left' },
+            ACN:          { page: 2, x: 405, y: 566, size: 10, origin: 'top-left' },
+            ABN:          { page: 2, x: 405, y: 521, size: 10, origin: 'top-left' },
             mobileNumber: { page: 2, x: 405, y: 484, size: 10, origin: 'top-left' },
             officeNumber: { page: 2, x: 405, y: 450, size: 10, origin: 'top-left' },
-            postCode: { page: 2, x: 405, y: 396, size: 10, origin: 'top-left' },
+            postCode:     { page: 2, x: 405, y: 396, size: 10, origin: 'top-left' },
 
-            agreedFee: { page: 3, x: 182, y: 508, size: 10, origin: 'top-left' },
-            contractStart: { page: 3, x: 182, y: 428, size: 10, origin: 'top-left' },
+            agreedFee:    { page: 3, x: 182, y: 508, size: 10, origin: 'top-left' },
+            contractStart:{ page: 3, x: 182, y: 428, size: 10, origin: 'top-left' },
 
-            mainService: { page: 4, x: 319, y: 554, size: 11, origin: 'top-left' },
-            p4CompanyName: { page: 4, x: 288, y: 524, size: 10, origin: 'top-left' },
-            servicesAssist: { page: 4, x: 365, y: 501, size: 10, origin: 'top-left' },
-            p5ClientName: { page: 5, x: 81, y: 150, size: 10, origin: 'top-left' },
-            p5Date1: { page: 5, x: 79, y: 114, size: 10, origin: 'top-left' },
-            p5OtherName: { page: 5, x: 403, y: 149, size: 10, origin: 'top-left' },
-            p5Date2: { page: 5, x: 402, y: 116, size: 10, origin: 'top-left' },
+            mainService:     { page: 4, x: 319, y: 554, size: 11, origin: 'top-left' },
+            p4CompanyName:   { page: 4, x: 288, y: 524, size: 10, origin: 'top-left' },
+            servicesAssist:  { page: 4, x: 365, y: 501, size: 10, origin: 'top-left' },
+            p5ClientName:    { page: 5, x: 81,  y: 150, size: 10, origin: 'top-left' },
+            p5Date1:         { page: 5, x: 79,  y: 114, size: 10, origin: 'top-left' },
+            p5OtherName:     { page: 5, x: 403, y: 149, size: 10, origin: 'top-left' },
+            p5Date2:         { page: 5, x: 402, y: 116, size: 10, origin: 'top-left' },
 
             guarantorCompany: { page: 6, x: 388, y: 616, size: 10, origin: 'top-left' },
-            guarantorACNABN: { page: 6, x: 101, y: 605, size: 10, origin: 'top-left' },
+            guarantorACNABN:  { page: 6, x: 101, y: 605, size: 10, origin: 'top-left' },
         },
-        clientSig: { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 6, x: 338, y: 72, width: 150, height: 50, origin: 'top-left' },
+        clientSig:   { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 6, x: 338, y:  72, width: 150, height: 50, origin: 'top-left' },
     },
+
     {
         name: 'CustomerInformation',
         path: 'guarantee-page.pdf',
@@ -382,42 +408,44 @@ const TEMPLATES = [
             ACN: { page: 1, x: 101, y: 605, size: 10, origin: 'top-left' },
             ABN: { page: 1, x: 101, y: 563, size: 10, origin: 'top-left' },
             directorName: { page: 1, x: 384, y: 102, size: 10, origin: 'top-left' },
-            submittedAt: { page: 1, x: 338, y: 74, size: 10, origin: 'top-left' },
+            submittedAt:  { page: 1, x: 338, y:  74, size: 10, origin: 'top-left' },
         },
-        clientSig: { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 6, x: 64, y: 466, width: 150, height: 50, origin: 'top-left' },
-        director1Sig: { page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
+        clientSig:   { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 6, x:  64, y: 466, width: 150, height: 50, origin: 'top-left' },
+        director1Sig:{ page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
     },
+
     {
         name: 'PricingSchedule',
         path: 'privacy-policy.pdf',
         fieldMap: {
-            businessName: { page: 1, x: 150, y: 660, size: 10, origin: 'top-left' },
-            service: { page: 1, x: 150, y: 640, size: 10, origin: 'top-left' },
-            planName: { page: 1, x: 150, y: 620, size: 10, origin: 'top-left' },
-            planPrice: { page: 1, x: 420, y: 620, size: 10, origin: 'top-left' },
-            addOnsSummary: { page: 1, x: 150, y: 600, size: 10, origin: 'top-left', maxWidth: 360 },
-            total: { page: 1, x: 420, y: 580, size: 12, origin: 'top-left' },
+            businessName:   { page: 1, x: 150, y: 660, size: 10, origin: 'top-left' },
+            service:        { page: 1, x: 150, y: 640, size: 10, origin: 'top-left' },
+            planName:       { page: 1, x: 150, y: 620, size: 10, origin: 'top-left' },
+            planPrice:      { page: 1, x: 420, y: 620, size: 10, origin: 'top-left' },
+            addOnsSummary:  { page: 1, x: 150, y: 600, size: 10, origin: 'top-left', maxWidth: 360 },
+            total:          { page: 1, x: 420, y: 580, size: 12, origin: 'top-left' },
         },
-        clientSig: { page: 6, x: 420, y: 90, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 6, x: 420, y: 40, width: 150, height: 50, origin: 'top-left' },
+        clientSig:   { page: 6, x: 420, y:  90, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 6, x: 420, y:  40, width: 150, height: 50, origin: 'top-left' },
     },
+
     {
         name: 'ConfidentialityAgreement',
         path: 'terms.pdf',
         fieldMap: {
             businessName: { page: 4, x: 120, y: 362, size: 10, origin: 'top-left' },
-            date: { page: 4, x: 430, y: 630, size: 10, origin: 'top-left' },
-            ACN: { page: 4, x: 406, y: 608, size: 10, origin: 'top-left' },
-            ABN: { page: 4, x: 406, y: 563, size: 10, origin: 'top-left' },
+            date:         { page: 4, x: 430, y: 630, size: 10, origin: 'top-left' },
+            ACN:          { page: 4, x: 406, y: 608, size: 10, origin: 'top-left' },
+            ABN:          { page: 4, x: 406, y: 563, size: 10, origin: 'top-left' },
         },
-        clientSig: { page: 6, x: 380, y: 80, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 4, x: 63, y: 466, width: 150, height: 50, origin: 'top-left' },
-        director1Sig: { page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
+        clientSig:   { page: 6, x: 380, y: 80, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 4, x:  63, y: 466, width: 150, height: 50, origin: 'top-left' },
+        director1Sig:{ page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
     },
 ];
 
-/* ----------------------- self-heal draft ----------------------- */
+// ------------------------- Self-heal: rebuild missing draft -------------------------
 async function ensureDraftExists(agreement, doc) {
     const template = TEMPLATES.find(t => t.name === doc.name);
     if (!template) throw new Error(`Template not found for ${doc.name}`);
@@ -434,76 +462,77 @@ async function ensureDraftExists(agreement, doc) {
     return outDraft;
 }
 
-/* ----------------------- template input mapping ----------------------- */
+// ------------------------- Template input mapping -------------------------
 function buildTemplateInput(templateName, agreementData, summaryData) {
     const base = {
-        businessName: agreementData.businessName || '',
-        tradingName: agreementData.tradingName || '',
-        clientFullName: agreementData.clientFullName || '',
-        dateOfBirth: agreementData.dateOfBirth || '',
-        email: agreementData.email || '',
-        phone: agreementData.phone || '',
-        registeredOffice: agreementData.registeredOffice || '',
+        businessName:       agreementData.businessName || '',
+        tradingName:        agreementData.tradingName || '',
+        clientFullName:     agreementData.clientFullName || '',
+        dateOfBirth:        agreementData.dateOfBirth || '',
+        email:              agreementData.email || '',
+        phone:              agreementData.phone || '',
+        registeredOffice:   agreementData.registeredOffice || '',
         registeredPostCode: agreementData.registeredPostCode || '',
-        postalAddress: agreementData.postalAddress || '',
-        postalPostCode: agreementData.postalPostCode || '',
-        businessAddress: agreementData.businessAddress || '',
-        businessPostCode: agreementData.businessPostCode || '',
-        departmentContact: agreementData.departmentContact || '',
-        contactNumber: agreementData.contactNumber || '',
-        departmentEmail: agreementData.departmentEmail || '',
-        officeNumber: agreementData.officeNumber || '',
-        nameOfDirector: agreementData.nameOfDirector || '',
-        addressOfDirector: agreementData.addressOfDirector || '',
-        driversLicense: agreementData.driversLicense || '',
-        acn_abn: agreementData.acn_abn || '',
-        mainService: agreementData.mainService || '',
-        contractStart: agreementData.contractStartDate || '',
-        contractStartDate: agreementData.contractStartDate || '',
+        postalAddress:      agreementData.postalAddress || '',
+        postalPostCode:     agreementData.postalPostCode || '',
+        businessAddress:    agreementData.businessAddress || '',
+        businessPostCode:   agreementData.businessPostCode || '',
+        departmentContact:  agreementData.departmentContact || '',
+        contactNumber:      agreementData.contactNumber || '',
+        departmentEmail:    agreementData.departmentEmail || '',
+        officeNumber:       agreementData.officeNumber || '',
+        nameOfDirector:     agreementData.nameOfDirector || '',
+        addressOfDirector:  agreementData.addressOfDirector || '',
+        driversLicense:     agreementData.driversLicense || '',
+        acn_abn:            agreementData.acn_abn || '',
+        mainService:        agreementData.mainService || '',
+        contractStart:      agreementData.contractStartDate || '',
+        contractStartDate:  agreementData.contractStartDate || '',
 
-        businessType: agreementData.businessType || '',
-        ACN: agreementData.ACN || '',
-        ABN: agreementData.ABN || '',
-        address: agreementData.address || '',
-        city: agreementData.city || '',
-        state: agreementData.state || '',
-        postalCode: agreementData.postalCode || '',
-        website: agreementData.website || '',
-        additionalNotes: agreementData.additionalNotes || '',
+        businessType:       agreementData.businessType || '',
+        ACN:                agreementData.ACN || '',
+        ABN:                agreementData.ABN || '',
+        address:            agreementData.address || '',
+        city:               agreementData.city || '',
+        state:              agreementData.state || '',
+        postalCode:         agreementData.postalCode || '',
+        website:            agreementData.website || '',
+        additionalNotes:    agreementData.additionalNotes || '',
 
         submittedAt: new Date(agreementData.submittedAt || Date.now()).toLocaleString(),
     };
 
     // aliases
-    base.companyName = base.businessName;
-    base.dearName = base.businessName;
-    base.customerName = base.businessName;
-    base.clientEmail = base.email;
-    base.mobileNumber = base.phone;
-    base.postCode = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
+    base.companyName   = base.businessName;
+    base.dearName      = base.businessName;
+    base.customerName  = base.businessName;
+    base.clientEmail   = base.email;
+    base.mobileNumber  = base.phone;
+    base.postCode      = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
     base.p4CompanyName = base.businessName;
-    base.servicesAssist = base.mainService || '';
-    base.directorName = base.nameOfDirector;
-    base.p5ClientName = base.clientFullName;
-    base.p5OtherName = base.directorName;
+    base.servicesAssist= base.mainService || '';
+    base.directorName  = base.nameOfDirector;
+    base.p5ClientName  = base.clientFullName;
+    base.p5OtherName   = base.directorName;
 
     const dateOnly = base.submittedAt.split(',')[0];
     base.p5Date1 = dateOnly;
     base.p5Date2 = dateOnly;
 
     base.guarantorCompany = base.businessName;
-    base.guarantorACNABN = base.ACN || base.ABN || base.acn_abn;
+    base.guarantorACNABN  = base.ACN || base.ABN || base.acn_abn;
 
     if (templateName === 'PricingSchedule' && summaryData) {
         const addOnsSummary = (summaryData.addOns || []).map(a => `${a.name} ($${a.price})`).join(', ');
-        base.service = summaryData.service || base.servicesAssist || '';
-        base.planName = summaryData.plan?.name || '';
-        base.planPrice = typeof summaryData.plan?.price === 'number' ? `$${summaryData.plan.price.toFixed(2)}` : '';
+        base.service       = summaryData.service || base.servicesAssist || '';
+        base.planName      = summaryData.plan?.name || '';
+        base.planPrice     = typeof summaryData.plan?.price === 'number' ? `$${summaryData.plan.price.toFixed(2)}` : '';
         base.addOnsSummary = addOnsSummary;
-        base.total = typeof summaryData.total === 'number' ? `$${summaryData.total.toFixed(2)}` : '';
+        base.total         = typeof summaryData.total === 'number' ? `$${summaryData.total.toFixed(2)}` : '';
     }
 
     if (templateName === 'ConfidentialityAgreement') base.executedDate = new Date().toLocaleDateString();
+
     return base;
 }
 
@@ -520,12 +549,12 @@ function getDirectorSigSpec(template, directorIndex) {
     return template.directorSig || template.director1Sig || null;
 }
 
-/* ----------------------- Microsoft Graph (optional) ----------------------- */
+// ------------------------- Microsoft Graph (optional) -------------------------
 const GRAPH_TENANT = (process.env.GRAPH_TENANT_ID || '').trim();
 const GRAPH_CLIENT = (process.env.GRAPH_CLIENT_ID || '').trim();
 const GRAPH_SECRET = (process.env.GRAPH_CLIENT_SECRET || '').trim();
-const SITE_ID = (process.env.GRAPH_SITE_ID || '').trim();
-const DRIVE_ID = (process.env.GRAPH_DRIVE_ID || '').trim();
+const SITE_ID      = (process.env.GRAPH_SITE_ID || '').trim();
+const DRIVE_ID     = (process.env.GRAPH_DRIVE_ID || '').trim();
 const SP_BASE_PATH = (process.env.SP_BASE_PATH || 'Agreements').replace(/^\/|\/$/g, '');
 
 app.get('/api/debug/graph-env', (req, res) => {
@@ -657,7 +686,7 @@ async function uploadAgreementToSharePoint(agreement) {
     console.log(`✅ Uploaded final PDFs & signatures to SharePoint: /${folderPath}`);
 }
 
-/* ----------------------- helpers ----------------------- */
+// ------------------------- helpers -------------------------
 function getDirectorEmails() {
     const multi = (process.env.DIRECTOR_EMAILS || '')
         .split(',').map(s => s.trim()).filter(Boolean);
@@ -665,22 +694,35 @@ function getDirectorEmails() {
     return (process.env.DIRECTOR_EMAIL ? [process.env.DIRECTOR_EMAIL] : []);
 }
 
-/* ----------------------- routes ----------------------- */
+async function safeSendMail(opts) {
+    try {
+        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.MAIL_MODE === 'console') {
+            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
+            return;
+        }
+        await transporter.sendMail(opts);
+    } catch (err) {
+        console.error('✉️  Mail send failed (non-fatal):', err?.message || err);
+    }
+}
 
-// New client login
+// ------------------------- routes -------------------------
+
 app.post('/api/new-client-login', async (req, res) => {
     const { businessName, email, phone } = req.body;
     try {
         await new Client({ businessName, email, phone }).save();
 
         await safeSendMail({
-            to: process.env.EMAIL_USER, // notify yourself
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER,
             subject: '🚀 New Client Logged In',
             text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
         });
 
         if (process.env.AGREEMENTS_INBOX) {
             await safeSendMail({
+                from: process.env.EMAIL_USER,
                 to: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][NEW-CLIENT] ${businessName}`,
                 text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
@@ -694,7 +736,7 @@ app.post('/api/new-client-login', async (req, res) => {
     }
 });
 
-// Session header helper
+// Tiny helper for the signing UI header
 app.get('/api/sign/session/:token', async (req, res) => {
     try {
         const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
@@ -718,61 +760,60 @@ app.post('/api/save-pricing-summary', async (req, res) => {
     }
 });
 
-// Prefill pack & email client links
+// Prefill the full pack and email client links
 app.post('/api/submit-agreement', async (req, res) => {
     const b = req.body;
-
-    const businessName = b.CompanyName ?? b.businessName;
+    const businessName   = b.CompanyName ?? b.businessName;
     const clientFullName = b.ClientFullName ?? b.clientFullName;
-    const email = b.ClientEmail ?? b.email;
-    const phone = b.MobileNumber ?? b.phone;
+    const email          = b.ClientEmail ?? b.email;
+    const phone          = b.MobileNumber ?? b.phone;
 
     if (![businessName, clientFullName, email, phone].every(v => v && String(v).trim()))
         return res.status(400).json({ message: 'Missing required fields (businessName, clientFullName, email, phone).' });
 
     try {
         const idDigits = String(b.ACN_ABN || '').replace(/\D/g, '');
-        const ACN = idDigits.length === 9 ? idDigits : (b.ACN || '');
+        const ACN = idDigits.length === 9  ? idDigits : (b.ACN || '');
         const ABN = idDigits.length === 11 ? idDigits : (b.ABN || '');
 
         const payload = {
             businessName,
-            tradingName: b.TradingName ?? b.tradingName ?? '',
+            tradingName:        b.TradingName ?? b.tradingName ?? '',
             clientFullName,
-            dateOfBirth: b.DateOfBirth ?? b.dateOfBirth ?? '',
+            dateOfBirth:        b.DateOfBirth ?? b.dateOfBirth ?? '',
             email,
             phone,
 
-            registeredOffice: b.RegisteredOffice ?? b.registeredOffice ?? '',
+            registeredOffice:   b.RegisteredOffice ?? b.registeredOffice ?? '',
             registeredPostCode: b.RegisteredPostCode ?? b.registeredPostCode ?? '',
-            postalAddress: b.PostalAddress ?? b.postalAddress ?? '',
-            postalPostCode: b.PostalPostCode ?? b.postalPostCode ?? '',
-            businessAddress: b.BusinessAddress ?? b.businessAddress ?? '',
-            businessPostCode: b.BusinessPostCode ?? b.businessPostCode ?? '',
+            postalAddress:      b.PostalAddress ?? b.postalAddress ?? '',
+            postalPostCode:     b.PostalPostCode ?? b.postalPostCode ?? '',
+            businessAddress:    b.BusinessAddress ?? b.businessAddress ?? '',
+            businessPostCode:   b.BusinessPostCode ?? b.businessPostCode ?? '',
 
-            departmentContact: b.DepartmentContact ?? b.departmentContact ?? '',
-            contactNumber: b.ContactNumber ?? b.contactNumber ?? '',
-            departmentEmail: b.DepartmentEmail ?? b.departmentEmail ?? '',
-            officeNumber: b.OfficeNumber ?? b.officeNumber ?? '',
+            departmentContact:  b.DepartmentContact ?? b.departmentContact ?? '',
+            contactNumber:      b.ContactNumber ?? b.contactNumber ?? '',
+            departmentEmail:    b.DepartmentEmail ?? b.departmentEmail ?? '',
+            officeNumber:       b.OfficeNumber ?? b.officeNumber ?? '',
 
-            nameOfDirector: b.NameOfDirector ?? b.nameOfDirector ?? '',
-            addressOfDirector: b.AddressOfDirector ?? b.addressOfDirector ?? '',
-            driversLicense: b.DriversLicense ?? b.driversLicense ?? '',
+            nameOfDirector:     b.NameOfDirector ?? b.nameOfDirector ?? '',
+            addressOfDirector:  b.AddressOfDirector ?? b.addressOfDirector ?? '',
+            driversLicense:     b.DriversLicense ?? b.driversLicense ?? '',
 
-            acn_abn: b.ACN_ABN ?? `${b.ACN || ''}${b.ABN ? ' / ' + b.ABN : ''}`,
+            acn_abn:            b.ACN_ABN ?? `${b.ACN || ''}${b.ABN ? ' / ' + b.ABN : ''}`,
             ACN, ABN,
 
-            mainService: b.MainService ?? b.mainService ?? '',
-            contractStartDate: b.ContractStartDate ?? b.contractStartDate ?? '',
-            JobType: b.JobType ?? b.jobType ?? '',
+            mainService:        b.MainService ?? b.mainService ?? '',
+            contractStartDate:  b.ContractStartDate ?? b.contractStartDate ?? '',
+            JobType:            b.JobType ?? b.jobType ?? '',
 
-            businessType: b.businessType ?? '',
-            address: b.address ?? '',
-            city: b.city ?? '',
-            state: b.state ?? '',
-            postalCode: b.postalCode ?? '',
-            website: b.website ?? '',
-            additionalNotes: b.additionalNotes ?? '',
+            businessType:       b.businessType ?? '',
+            address:            b.address ?? '',
+            city:               b.city ?? '',
+            state:              b.state ?? '',
+            postalCode:         b.postalCode ?? '',
+            website:            b.website ?? '',
+            additionalNotes:    b.additionalNotes ?? '',
 
             submittedAt: new Date(),
         };
@@ -811,6 +852,7 @@ app.post('/api/submit-agreement', async (req, res) => {
 
         const attachments = documents.map(d => ({ filename: `${d.name}-Draft.pdf`, path: d.draftPdfPath }));
         await safeSendMail({
+            from: process.env.EMAIL_USER,
             to: newAgreement.email,
             bcc: process.env.AGREEMENTS_INBOX,
             subject: '📄 Your Prefilled Agreement Pack',
@@ -821,17 +863,14 @@ app.post('/api/submit-agreement', async (req, res) => {
             attachments,
         });
 
-        res.status(200).json({
-            message: 'Agreement saved, drafts generated.',
-            signLinks,
-        });
+        res.status(200).json({ message: 'Agreement saved, drafts generated.', signLinks });
     } catch (e) {
         console.error('❌ Error saving agreement:', e);
         res.status(500).json({ message: 'Failed to save and send agreement.' });
     }
 });
 
-// PDF preview (self-healing)
+// Self-healing PDF preview
 app.get('/api/sign/preview/:token', async (req, res) => {
     try {
         const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
@@ -845,7 +884,9 @@ app.get('/api/sign/preview/:token', async (req, res) => {
             ? (doc.clientSignedPdfPath || doc.draftPdfPath || doc.finalSignedPdfPath)
             : (doc.finalSignedPdfPath || doc.clientSignedPdfPath || doc.draftPdfPath);
 
-        if (!filePath || !fs.existsSync(filePath)) filePath = await ensureDraftExists(ag, doc);
+        if (!filePath || !fs.existsSync(filePath)) {
+            filePath = await ensureDraftExists(ag, doc);
+        }
 
         res.setHeader('Content-Type', 'application/pdf');
         fs.createReadStream(filePath).pipe(res);
@@ -855,7 +896,7 @@ app.get('/api/sign/preview/:token', async (req, res) => {
     }
 });
 
-// Client signs
+// Client signs a document
 app.post('/api/sign/:token', async (req, res) => {
     const { signature, coords } = req.body;
     if (!signature) return res.status(400).json({ message: 'Missing signature' });
@@ -907,7 +948,7 @@ app.post('/api/sign/:token', async (req, res) => {
             return res.status(200).json({ nextDocToken: nextToken });
         }
 
-        // All client docs done → director links & emails
+        // All client docs done -> prepare director links & email
         const directorEmails = getDirectorEmails();
         for (const d of ag.documents) {
             d.directors = directorEmails.map((email, idx) => ({
@@ -933,6 +974,7 @@ app.post('/api/sign/:token', async (req, res) => {
                 .map(d => ({ filename: `ClientSigned_${d.name}.pdf`, path: d.clientSignedPdfPath }));
 
             await safeSendMail({
+                from: process.env.EMAIL_USER,
                 to: email,
                 bcc: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][CLIENT-SIGNED] ${ag.businessName}`,
@@ -948,7 +990,17 @@ app.post('/api/sign/:token', async (req, res) => {
     }
 });
 
-// Director signs
+// Debug: what director emails are parsed?
+app.get('/api/debug/directors-env', (req, res) => {
+    res.json({
+        DIRECTOR_EMAILS: process.env.DIRECTOR_EMAILS || null,
+        DIRECTOR_EMAIL: process.env.DIRECTOR_EMAIL || null,
+        parsed: (process.env.DIRECTOR_EMAILS || '')
+            .split(',').map(s => s.trim()).filter(Boolean)
+    });
+});
+
+// Director signs a document
 app.post('/api/sign-director/:token', async (req, res) => {
     const { signature, coords } = req.body;
     if (!signature) return res.status(400).json({ message: 'Missing signature' });
@@ -983,9 +1035,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
         const basePdf = (doc.finalSignedPdfPath && fs.existsSync(doc.finalSignedPdfPath))
             ? doc.finalSignedPdfPath
             : doc.clientSignedPdfPath;
-        if (!basePdf || !fs.existsSync(basePdf)) {
-            return res.status(500).json({ message: `Base PDF missing for ${doc.name}` });
-        }
+        if (!basePdf || !fs.existsSync(basePdf)) return res.status(500).json({ message: `Base PDF missing for ${doc.name}` });
 
         const outFile = path.join(PDF_DIR, `final-${doc.name}-d${directorIndex + 1}-${ag._id}-${ts}.pdf`);
         await stampSignatureWithTime(basePdf, signature, sigSpec, coords, outFile, `Director ${directorIndex + 1} signed at`);
@@ -998,7 +1048,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
         doc.finalSignedPdfPath = outFile;
         await ag.save();
 
-        // same director → next doc?
+        // same director -> next doc
         const nextDoc = ag.documents.find(d =>
             d.clientSigned && d.directors && d.directors[directorIndex] && !d.directors[directorIndex].signed
         );
@@ -1013,7 +1063,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
             return res.status(200).json({ nextDocToken: nextDoc.directors[directorIndex].directorSignToken });
         }
 
-        // everyone done?
+        // all done?
         const allDirectorsComplete = ag.documents.every(d =>
             d.clientSigned && d.directors && d.directors.length && d.directors.every(x => x.signed)
         );
@@ -1021,6 +1071,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
         if (allDirectorsComplete) {
             const attachments = ag.documents.map(d => ({ filename: `Final_${d.name}.pdf`, path: d.finalSignedPdfPath }));
             await safeSendMail({
+                from: process.env.EMAIL_USER,
                 to: ag.email,
                 bcc: [...getDirectorEmails(), process.env.AGREEMENTS_INBOX].filter(Boolean).join(','),
                 subject: `[AGREEMENT][FINAL] ${ag.businessName}`,
@@ -1037,6 +1088,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
 
             return res.status(200).json({ complete: true });
         }
+
         res.status(200).json({ done: true });
     } catch (e) {
         console.error('Director sign error:', e);
@@ -1044,28 +1096,22 @@ app.post('/api/sign-director/:token', async (req, res) => {
     }
 });
 
-/* ----------------------- debug ----------------------- */
-app.get('/api/debug/directors-env', (req, res) => {
-    res.json({
-        DIRECTOR_EMAILS: process.env.DIRECTOR_EMAILS || null,
-        DIRECTOR_EMAIL: process.env.DIRECTOR_EMAIL || null,
-        parsed: (process.env.DIRECTOR_EMAILS || '').split(',').map(s => s.trim()).filter(Boolean)
-    });
-});
-
+// ------------------------- Debug endpoints -------------------------
 app.get('/api/debug/agreements', async (req, res) => {
     const ags = await Agreement.find().lean();
     res.json(ags);
 });
-
 app.post('/api/debug/graph-upload', async (req, res) => {
     try {
         if (!GRAPH_TENANT || !GRAPH_CLIENT || !GRAPH_SECRET || !DRIVE_ID || !PUBLIC_WEB_URL) {
             return res.status(400).json({
                 message: 'Graph env missing',
                 details: {
-                    GRAPH_TENANT: !!GRAPH_TENANT, GRAPH_CLIENT: !!GRAPH_CLIENT, GRAPH_SECRET: !!GRAPH_SECRET,
-                    DRIVE_ID: !!DRIVE_ID, PUBLIC_WEB_URL: !!PUBLIC_WEB_URL
+                    GRAPH_TENANT: !!GRAPH_TENANT,
+                    GRAPH_CLIENT: !!GRAPH_CLIENT,
+                    GRAPH_SECRET: !!GRAPH_SECRET,
+                    DRIVE_ID: !!DRIVE_ID,
+                    PUBLIC_WEB_URL: !!PUBLIC_WEB_URL
                 }
             });
         }
@@ -1078,14 +1124,41 @@ app.post('/api/debug/graph-upload', async (req, res) => {
         res.status(500).json({ message: 'Graph upload failed', error: e?.response?.data || e.message || String(e) });
     }
 });
-
 app.get('/api/debug/app-env', (req, res) => {
     const pub = (process.env.PUBLIC_WEB_URL || '').toString();
     const cors = (process.env.CORS_ORIGINS || '').toString();
     res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
 });
+// ------------------------- mail debug -------------------------
+app.get('/api/debug/mail-env', (req, res) => {
+    const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
+    res.json({
+        MAIL_MODE: mode,
+        EMAIL_USER: !!process.env.EMAIL_USER,
+        EMAIL_PASS: !!process.env.EMAIL_PASS,
+        SMTP_HOST: process.env.SMTP_HOST || null,
+        SMTP_PORT: process.env.SMTP_PORT || null,
+        SMTP_USER: process.env.SMTP_USER ? '(set)' : null,
+        SMTP_PASS: process.env.SMTP_PASS ? '(set)' : null,
+        MAIL_TIMEOUT: process.env.MAIL_TIMEOUT || '12000',
+    });
+});
 
-/* ----------------------- root & start ----------------------- */
+app.post('/api/debug/mail-test', async (req, res) => {
+    const to = req.body.to || process.env.AGREEMENTS_INBOX || process.env.EMAIL_USER;
+    try {
+        await safeSendMail({
+            to,
+            subject: 'Mail test from backend',
+            text: 'If you see this, your SMTP transport works.'
+        });
+        res.json({ ok: true, to });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e?.message || String(e) });
+    }
+});
+
+// ------------------------- Root & start -------------------------
 app.get('/', (req, res) => {
     res.send('Backend is live 🚀');
 });
