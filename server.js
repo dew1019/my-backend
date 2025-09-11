@@ -1,5 +1,4 @@
-
-
+// server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -51,7 +50,7 @@ mongoose.connect(MONGO_URI)
 // ------------------------- mail transport -------------------------
 const globalAny = global;
 
-// Helper: build transport from env
+// Build nodemailer transport from env
 function createTransportFromEnv() {
     const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
 
@@ -63,16 +62,16 @@ function createTransportFromEnv() {
     if (mode === 'smtp') {
         const host   = process.env.SMTP_HOST;         // e.g. smtp.sendgrid.net
         const port   = Number(process.env.SMTP_PORT); // e.g. 587
-        const secure = port === 465;                  // 465 = TLS, 587 = STARTTLS
+        const secure = port === 465;                  // 465 TLS, 587 STARTTLS
         const user   = process.env.SMTP_USER;         // e.g. "apikey" for SendGrid
-        const pass   = process.env.SMTP_PASS;         // your SendGrid API key
+        const pass   = process.env.SMTP_PASS;         // e.g. SG.xxxxx
 
         if (!host || !port || !user || !pass) {
             console.warn('✉️  MAIL_MODE=smtp but SMTP_* vars missing. Falling back to console.');
             return nodemailer.createTransport({ jsonTransport: true });
         }
 
-        const timeout = Number(process.env.MAIL_TIMEOUT || 12000); // 12s default
+        const timeout = Number(process.env.MAIL_TIMEOUT || 12000); // ms
 
         console.log(`✉️  MAIL_MODE=smtp → ${host}:${port} secure=${secure}`);
         return nodemailer.createTransport({
@@ -83,7 +82,6 @@ function createTransportFromEnv() {
             pool: true,
             maxConnections: 3,
             maxMessages: 50,
-            // timeouts (avoid hanging containers)
             connectionTimeout: timeout,
             greetingTimeout: timeout,
             socketTimeout: timeout,
@@ -91,7 +89,7 @@ function createTransportFromEnv() {
     }
 
     if (mode === 'gmail') {
-        // Use ONLY if you have a Gmail App Password (not your normal password)
+        // Requires Gmail App Password (not your normal password)
         const user = process.env.EMAIL_USER;
         const pass = process.env.EMAIL_PASS;
         if (!user || !pass) {
@@ -99,7 +97,7 @@ function createTransportFromEnv() {
             return nodemailer.createTransport({ jsonTransport: true });
         }
         const timeout = Number(process.env.MAIL_TIMEOUT || 12000);
-        console.log('✉️  MAIL_MODE=gmail (gmail SMTP via service)');
+        console.log('✉️  MAIL_MODE=gmail (Gmail SMTP via service)');
         return nodemailer.createTransport({
             service: 'gmail',
             auth: { user, pass },
@@ -121,9 +119,7 @@ if (!transporter) {
     globalAny.__mailer = transporter;
 }
 
-
-
-
+// ------------------------- schemas -------------------------
 const clientSchema = new mongoose.Schema({
     businessName: String,
     email: String,
@@ -695,14 +691,25 @@ function getDirectorEmails() {
 }
 
 async function safeSendMail(opts) {
+    const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
     try {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.MAIL_MODE === 'console') {
-            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
+        if (mode === 'console') {
+            console.log('✉️  [mail disabled] Would send:', {
+                to: opts.to, subject: opts.subject, text: opts.text
+            });
             return;
         }
-        await transporter.sendMail(opts);
+        const defaultFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@localhost';
+        const final = { from: opts.from || defaultFrom, ...opts };
+
+        await transporter.sendMail(final);
+        console.log('✉️  Mail queued:', { to: final.to, subject: final.subject });
     } catch (err) {
-        console.error('✉️  Mail send failed (non-fatal):', err?.message || err);
+        const msg = err?.message || String(err);
+        const hint = /ETIMEDOUT|timeout|ECONNREFUSED|EHOSTUNREACH|blocked/i.test(msg)
+            ? '💡 Hint: Your host may block SMTP 465/587. Use a provider/relay reachable from your host, or switch hosts.'
+            : '';
+        console.error(`✉️  Mail send failed: ${msg}${hint ? '\n' + hint : ''}`);
     }
 }
 
@@ -714,7 +721,6 @@ app.post('/api/new-client-login', async (req, res) => {
         await new Client({ businessName, email, phone }).save();
 
         await safeSendMail({
-            from: process.env.EMAIL_USER,
             to: process.env.EMAIL_USER,
             subject: '🚀 New Client Logged In',
             text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
@@ -722,7 +728,6 @@ app.post('/api/new-client-login', async (req, res) => {
 
         if (process.env.AGREEMENTS_INBOX) {
             await safeSendMail({
-                from: process.env.EMAIL_USER,
                 to: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][NEW-CLIENT] ${businessName}`,
                 text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
@@ -852,7 +857,6 @@ app.post('/api/submit-agreement', async (req, res) => {
 
         const attachments = documents.map(d => ({ filename: `${d.name}-Draft.pdf`, path: d.draftPdfPath }));
         await safeSendMail({
-            from: process.env.EMAIL_USER,
             to: newAgreement.email,
             bcc: process.env.AGREEMENTS_INBOX,
             subject: '📄 Your Prefilled Agreement Pack',
@@ -974,7 +978,6 @@ app.post('/api/sign/:token', async (req, res) => {
                 .map(d => ({ filename: `ClientSigned_${d.name}.pdf`, path: d.clientSignedPdfPath }));
 
             await safeSendMail({
-                from: process.env.EMAIL_USER,
                 to: email,
                 bcc: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][CLIENT-SIGNED] ${ag.businessName}`,
@@ -1071,7 +1074,6 @@ app.post('/api/sign-director/:token', async (req, res) => {
         if (allDirectorsComplete) {
             const attachments = ag.documents.map(d => ({ filename: `Final_${d.name}.pdf`, path: d.finalSignedPdfPath }));
             await safeSendMail({
-                from: process.env.EMAIL_USER,
                 to: ag.email,
                 bcc: [...getDirectorEmails(), process.env.AGREEMENTS_INBOX].filter(Boolean).join(','),
                 subject: `[AGREEMENT][FINAL] ${ag.businessName}`,
@@ -1129,7 +1131,8 @@ app.get('/api/debug/app-env', (req, res) => {
     const cors = (process.env.CORS_ORIGINS || '').toString();
     res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
 });
-// ------------------------- mail debug -------------------------
+
+// -------- Mail debug helpers --------
 app.get('/api/debug/mail-env', (req, res) => {
     const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
     res.json({
