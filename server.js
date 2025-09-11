@@ -792,7 +792,7 @@ app.post('/api/submit-agreement', async (req, res) => {
         await newAgreement.save();
 
         const attachments = documents.map(d => ({ filename: `${d.name}-Draft.pdf`, path: d.draftPdfPath }));
-        await transporter.sendMail({
+        await safeSendMail({
             from: process.env.EMAIL_USER,
             to: newAgreement.email,
             bcc: process.env.AGREEMENTS_INBOX,
@@ -905,7 +905,7 @@ app.post('/api/sign/:token', async (req, res) => {
                 .filter(d => d.clientSignedPdfPath && fs.existsSync(d.clientSignedPdfPath))
                 .map(d => ({ filename: `ClientSigned_${d.name}.pdf`, path: d.clientSignedPdfPath }));
 
-            await transporter.sendMail({
+            await safeSendMail({
                 from: process.env.EMAIL_USER,
                 to: email,
                 bcc: process.env.AGREEMENTS_INBOX,
