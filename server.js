@@ -501,6 +501,23 @@ app.get('/api/debug/graph-env', (req, res) => {
         SP_BASE_PATH: process.env.SP_BASE_PATH || 'Agreements'
     });
 });
+// Rebuild a draft from its template if the file is missing
+async function ensureDraftExists(agreement, doc) {
+    const template = TEMPLATES.find(t => t.name === doc.name);
+    if (!template) throw new Error(`Template not found for ${doc.name}`);
+
+    const templatePath = path.join(PDF_TEMPLATES_DIR, template.path);
+    const summary = await Summary.findOne({ email: agreement.email }).sort({ createdAt: -1 });
+    const input = buildTemplateInput(doc.name, agreement.toObject(), summary);
+
+    const outDraft = path.join(PDF_DIR, `rehydrated-${doc.name}-${Date.now()}.pdf`);
+    await drawFieldsOnPdf(templatePath, template.fieldMap, input, outDraft);
+
+    // Persist so later calls don’t need to rebuild again
+    if (!doc.draftPdfPath) doc.draftPdfPath = outDraft;
+    await agreement.save();
+    return outDraft;
+}
 
 async function getAppToken() {
     const url = `https://login.microsoftonline.com/${GRAPH_TENANT}/oauth2/v2.0/token`;
@@ -882,9 +899,13 @@ app.post('/api/sign/:token', async (req, res) => {
         const template = TEMPLATES.find(t => t.name === doc.name);
         if (!template) return res.status(500).json({ message: `Template not found for ${doc.name}` });
 
-        const inFile = doc.draftPdfPath;
-        if (!inFile || !fs.existsSync(inFile)) return res.status(500).json({ message: `Draft PDF missing for ${doc.name}` });
-
+        // 👇 try to use saved draft, otherwise rebuild it
+        let inFile = doc.draftPdfPath;
+        if (!inFile || !fs.existsSync(inFile)) {
+            inFile = await ensureDraftExists(ag, doc);  // self-heal after Railway/Vercel restart
+            doc.draftPdfPath = inFile;
+            await ag.save();
+        }
         const ts = nowIso().replace(/[:.]/g, '-');
         const safeBusiness = safeFolderName(ag.businessName || 'Client');
 
