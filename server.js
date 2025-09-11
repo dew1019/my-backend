@@ -1037,6 +1037,12 @@ app.post('/api/debug/graph-upload', async (req, res) => {
         res.status(500).json({ message: 'Graph upload failed', error: e?.response?.data || e.message || String(e) });
     }
 });
+// DEBUG: see what the server *actually* sees
+app.get('/api/debug/app-env', (req, res) => {
+    const pub = (process.env.PUBLIC_WEB_URL || '').toString();
+    const cors = (process.env.CORS_ORIGINS || '').toString();
+    res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
+});
 
 app.get("/", (req, res) => {
     res.send("Backend is live 🚀");
