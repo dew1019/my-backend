@@ -814,22 +814,54 @@ app.post('/api/submit-agreement', async (req, res) => {
     }
 });
 
-
-// Preview a PDF for a sign token
+// Replace your /api/sign/preview route with this "self-healing" version.
 app.get('/api/sign/preview/:token', async (req, res) => {
     try {
         const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
         const ag = await Agreement.findById(decoded.agid);
         if (!ag) return res.status(404).send('Agreement not found');
-        const doc = decoded.docName ? ag.documents.find(d => d.name === decoded.docName) : ag.documents[0];
+
+        // Find the doc this token is for
+        const doc = decoded.docName
+            ? ag.documents.find(d => d.name === decoded.docName)
+            : ag.documents[0];
         if (!doc) return res.status(404).send('Document not found');
-        const filePath = (decoded.role === 'client')
+
+        // Preferred file depending on role
+        let filePath = (decoded.role === 'client')
             ? (doc.clientSignedPdfPath || doc.draftPdfPath || doc.finalSignedPdfPath)
             : (doc.finalSignedPdfPath || doc.clientSignedPdfPath || doc.draftPdfPath);
-        if (!filePath || !fs.existsSync(filePath)) return res.status(404).send('PDF not found');
+
+        // 👇 Self-heal: if the file is missing, rebuild the draft from template
+        if (!filePath || !fs.existsSync(filePath)) {
+            const template = TEMPLATES.find(t => t.name === doc.name);
+            if (!template) return res.status(500).send(`Template not found for ${doc.name}`);
+
+            const templatePath = path.join(PDF_TEMPLATES_DIR, template.path);
+
+            // If you want the PricingSchedule fields, grab the latest Summary for this email
+            const summary = await Summary.findOne({ email: ag.email }).sort({ createdAt: -1 });
+
+            // Build the input used when you first created the pack
+            const input = buildTemplateInput(doc.name, ag.toObject(), summary);
+
+            // Rebuild a fresh draft into /pdfs and update doc
+            const outDraft = path.join(PDF_DIR, `rehydrated-${doc.name}-${Date.now()}.pdf`);
+            await drawFieldsOnPdf(templatePath, template.fieldMap, input, outDraft);
+
+            // Persist so subsequent previews don’t have to rebuild again
+            doc.draftPdfPath = doc.draftPdfPath || outDraft;
+            await ag.save();
+
+            filePath = outDraft;
+        }
+
         res.setHeader('Content-Type', 'application/pdf');
-        fs.createReadStream(filePath).pipe(res);
-    } catch (e) { res.status(401).send('Invalid or expired link'); }
+        return fs.createReadStream(filePath).pipe(res);
+    } catch (e) {
+        console.error('preview error:', e);
+        return res.status(404).send('PDF not found');
+    }
 });
 
 // Client signs a document
