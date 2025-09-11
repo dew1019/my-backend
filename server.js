@@ -11,6 +11,8 @@ const path = require('path');
 const axios = require('axios');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
+// Use this everywhere. Strip trailing slashes to avoid // in links.
+const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/,'');
 
 const app = express();
 const PORT = process.env.PORT || 5003;
@@ -782,7 +784,7 @@ app.post('/api/submit-agreement', async (req, res) => {
                 clientSignToken,
                 directors: [], // filled at director stage
             });
-            signLinks.push(`• ${t.name}: ${process.env.PUBLIC_WEB_URL}/sign/${clientSignToken}`);
+            signLinks.push(`• ${t.name}: ${PUBLIC_WEB_URL}/sign/${clientSignToken}`);
         }
 
         newAgreement.documents = documents;
@@ -802,7 +804,10 @@ app.post('/api/submit-agreement', async (req, res) => {
             attachments,
         });
 
-        res.status(200).json({ message: 'Agreement saved, drafts generated, and sign links sent.' });
+        res.status(200).json({
+              message: 'Agreement saved, drafts generated, and sign links sent.',
+              links: signLinks
+        });
     } catch (e) {
         console.error('❌ Error saving agreement:', e);
         res.status(500).json({ message: 'Failed to save and send agreement.' });
@@ -894,7 +899,7 @@ app.post('/api/sign/:token', async (req, res) => {
         for (let i = 0; i < directorEmails.length; i++) {
             const email = directorEmails[i];
             const directorLinks = ag.documents.map(
-                d => `• ${d.name}: ${process.env.PUBLIC_WEB_URL}/sign-director/${encodeURIComponent(d.directors[i].directorSignToken)}`
+                d =>  `• ${d.name}: ${PUBLIC_WEB_URL}/sign-director/${encodeURIComponent(d.directors[i].directorSignToken)}`
             );
             const attachments = ag.documents
                 .filter(d => d.clientSignedPdfPath && fs.existsSync(d.clientSignedPdfPath))
