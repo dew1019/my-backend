@@ -1,5 +1,4 @@
-
-
+// server.js
 require('dotenv').config();
 
 const express = require('express');
@@ -13,6 +12,7 @@ const axios = require('axios');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
 
+// Public site used in links
 const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/,'');
 
 const app = express();
@@ -27,38 +27,120 @@ app.use(cors({
         if (!origin) return cb(null, true);
         cb(null, allowedOrigins.includes(origin));
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET','POST','OPTIONS'],
+    allowedHeaders: ['Content-Type','Authorization'],
     credentials: true,
     optionsSuccessStatus: 204
 }));
 
 app.use(bodyParser.json({ limit: '25mb' }));
 
-// ------------------------- storage paths -------------------------
+/* ----------------------- storage paths ----------------------- */
 const ROOT_DIR = __dirname;
 const PDF_DIR = path.join(ROOT_DIR, 'pdfs');
 const SIG_DIR = path.join(ROOT_DIR, 'signatures');
 const PDF_TEMPLATES_DIR = path.join(ROOT_DIR, 'pdf-templates');
 for (const d of [PDF_DIR, SIG_DIR, PDF_TEMPLATES_DIR]) if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
 
-// ------------------------- database -------------------------
+/* ----------------------- database ----------------------- */
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/bpo_service_db';
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB error:', err));
 
+/* ----------------------- TIMEOUT-HARDENED MAILER ----------------------- */
 const globalAny = global;
 let transporter = globalAny.__mailer;
+
+function buildMailTransport() {
+    // 1) Console mode (never tries network)
+    if (process.env.MAIL_MODE === 'console') {
+        console.log('✉️  Mail transport: console (no SMTP)');
+        return nodemailer.createTransport({ jsonTransport: true });
+    }
+
+    // 2) Custom SMTP (recommended for hosts that block Gmail)
+    if (process.env.SMTP_HOST) {
+        const host = process.env.SMTP_HOST;
+        const port = Number(process.env.SMTP_PORT || 587);
+        const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true' || port === 465;
+        console.log(`✉️  Mail transport: custom SMTP ${host}:${port} secure=${secure}`);
+        return nodemailer.createTransport({
+            host,
+            port,
+            secure,
+            pool: true,
+            maxConnections: 3,
+            maxMessages: 100,
+            connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 20000), // 20s
+            greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 10000),     // 10s
+            socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 20000),         // 20s
+            auth: (process.env.SMTP_USER && process.env.SMTP_PASS) ? {
+                user: process.env.SMTP_USER,
+                pass: process.env.SMTP_PASS,
+            } : undefined,
+        });
+    }
+
+    // 3) Gmail SMTP (often blocked on PaaS; needs App Password)
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+        console.log('✉️  Mail transport: Gmail service');
+        return nodemailer.createTransport({
+            service: 'gmail',
+            pool: true,
+            maxConnections: 3,
+            maxMessages: 100,
+            connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT || 20000),
+            greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT || 10000),
+            socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT || 20000),
+            auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+        });
+    }
+
+    // 4) No credentials -> console fallback
+    console.log('✉️  Mail transport: fallback to console (no creds)');
+    return nodemailer.createTransport({ jsonTransport: true });
+}
+
 if (!transporter) {
-    transporter = nodemailer.createTransport(
-        process.env.MAIL_MODE === 'console'
-            ? { jsonTransport: true }
-            : { service: 'gmail', auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } }
-    );
+    transporter = buildMailTransport();
     globalAny.__mailer = transporter;
 }
 
+// Single place to actually send mail with helpful timeout messages
+async function safeSendMail(opts) {
+    try {
+        // If we're in console mode, print & exit
+        const isConsole =
+            process.env.MAIL_MODE === 'console' ||
+            (transporter.transporter && transporter.transporter.name === 'JSONTransport');
+
+        if (isConsole) {
+            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
+            return { ok: true, mode: 'console' };
+        }
+
+        const info = await transporter.sendMail(opts);
+        return { ok: true, id: info.messageId };
+    } catch (err) {
+        const msg = err?.message || String(err);
+        const code = err?.code || err?.errno || '';
+        const timeoutish = /ETIMEDOUT|ECONNECTION|ESOCKET|EHOSTUNREACH|ENETUNREACH|ETIME|Connection timeout/i.test(msg) || /TIMEDOUT/i.test(code);
+
+        // Print a concise, actionable hint
+        if (timeoutish) {
+            console.error('✉️  Mail send failed (timeout/blocked):', msg);
+            console.error('💡 Hint: Your host likely blocks SMTP. Use a relay via SMTP_HOST/SMTP_PORT or set MAIL_MODE=console for testing.');
+        } else {
+            console.error('✉️  Mail send failed:', msg);
+        }
+
+        // Soft-fail so the app flow continues
+        return { ok: false, error: msg };
+    }
+}
+
+/* ----------------------- schemas ----------------------- */
 const clientSchema = new mongoose.Schema({
     businessName: String,
     email: String,
@@ -76,7 +158,7 @@ const directorSlotSchema = new mongoose.Schema({
     signed: { type: Boolean, default: false },
     signedDate: Date,
     signedPdfPath: String,
-},{ _id: false });
+}, { _id: false });
 
 const agreementDocumentSchema = new mongoose.Schema({
     name: String,
@@ -100,10 +182,9 @@ const agreementDocumentSchema = new mongoose.Schema({
 
     // multi-director
     directors: [directorSlotSchema],
-},{ _id: false });
+}, { _id: false });
 
 const agreementSchema = new mongoose.Schema({
-    // canonical fields
     businessName: String,
     tradingName: String,
     clientFullName: String,
@@ -173,7 +254,7 @@ const Client = mongoose.model('Client', clientSchema, 'clients');
 const Agreement = mongoose.model('Agreement', agreementSchema, 'agreements');
 const Summary = mongoose.model('Summary', summarySchema, 'summaries');
 
-// ------------------------- utils -------------------------
+/* ----------------------- utils ----------------------- */
 function dataUrlToBuffer(dataUrl) {
     if (!dataUrl) return null;
     const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
@@ -181,8 +262,11 @@ function dataUrlToBuffer(dataUrl) {
 }
 const nowIso = () => new Date().toISOString();
 function nowLocal() {
-    try { return new Date().toLocaleString('en-AU', { timeZone: process.env.TIMEZONE || 'Australia/Melbourne' }); }
-    catch { return new Date().toLocaleString(); }
+    try {
+        return new Date().toLocaleString('en-AU', { timeZone: process.env.TIMEZONE || 'Australia/Melbourne' });
+    } catch {
+        return new Date().toLocaleString();
+    }
 }
 function safeFolderName(name = 'Client') {
     let s = (name || 'Client')
@@ -196,7 +280,7 @@ function safeFolderName(name = 'Client') {
     return s;
 }
 
-// ------------------------- PDF helpers -------------------------
+/* ----------------------- PDF helpers ----------------------- */
 function getSafePage(pdfDoc, wantedPage, label = 'page') {
     const count = pdfDoc.getPageCount();
     let idx;
@@ -289,7 +373,7 @@ async function stampSignatureWithTime(inPath, signatureDataUrl, templateCoords, 
     return outPath;
 }
 
-// ------------------------- Templates -------------------------
+/* ----------------------- Templates ----------------------- */
 const TEMPLATES = [
     {
         name: 'ServiceAgreement',
@@ -380,7 +464,7 @@ const TEMPLATES = [
     },
 ];
 
-// ------------------------- Self-heal: rebuild missing draft -------------------------
+/* ----------------------- Self-heal: rebuild missing draft ----------------------- */
 async function ensureDraftExists(agreement, doc) {
     const template = TEMPLATES.find(t => t.name === doc.name);
     if (!template) throw new Error(`Template not found for ${doc.name}`);
@@ -397,7 +481,7 @@ async function ensureDraftExists(agreement, doc) {
     return outDraft;
 }
 
-// ------------------------- Template input mapping -------------------------
+/* ----------------------- Template input mapping ----------------------- */
 function buildTemplateInput(templateName, agreementData, summaryData) {
     const base = {
         businessName:       agreementData.businessName || '',
@@ -438,17 +522,17 @@ function buildTemplateInput(templateName, agreementData, summaryData) {
     };
 
     // aliases
-    base.companyName   = base.businessName;
-    base.dearName      = base.businessName;
-    base.customerName  = base.businessName;
-    base.clientEmail   = base.email;
-    base.mobileNumber  = base.phone;
-    base.postCode      = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
-    base.p4CompanyName = base.businessName;
-    base.servicesAssist= base.mainService || '';
-    base.directorName  = base.nameOfDirector;
-    base.p5ClientName  = base.clientFullName;
-    base.p5OtherName   = base.directorName;
+    base.companyName    = base.businessName;
+    base.dearName       = base.businessName;
+    base.customerName   = base.businessName;
+    base.clientEmail    = base.email;
+    base.mobileNumber   = base.phone;
+    base.postCode       = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
+    base.p4CompanyName  = base.businessName;
+    base.servicesAssist = base.mainService || '';
+    base.directorName   = base.nameOfDirector;
+    base.p5ClientName   = base.clientFullName;
+    base.p5OtherName    = base.directorName;
 
     const dateOnly = base.submittedAt.split(',')[0];
     base.p5Date1 = dateOnly;
@@ -484,7 +568,7 @@ function getDirectorSigSpec(template, directorIndex) {
     return template.directorSig || template.director1Sig || null;
 }
 
-// ------------------------- Microsoft Graph (optional) -------------------------
+/* ----------------------- Microsoft Graph (optional) ----------------------- */
 const GRAPH_TENANT = (process.env.GRAPH_TENANT_ID || '').trim();
 const GRAPH_CLIENT = (process.env.GRAPH_CLIENT_ID || '').trim();
 const GRAPH_SECRET = (process.env.GRAPH_CLIENT_SECRET || '').trim();
@@ -513,7 +597,6 @@ async function getAppToken() {
     const { data } = await axios.post(url, params);
     return data.access_token;
 }
-
 async function graphRequest(token, method, url, data, headers = {}) {
     return axios({
         method,
@@ -522,7 +605,6 @@ async function graphRequest(token, method, url, data, headers = {}) {
         data
     });
 }
-
 async function ensureFolderPath(token, driveId, segments) {
     let currentPath = '';
     for (const seg of segments) {
@@ -542,7 +624,6 @@ async function ensureFolderPath(token, driveId, segments) {
     }
     return currentPath;
 }
-
 async function uploadSmall(token, driveId, fullPath, fileBuffer) {
     const url = `/drives/${driveId}/root:/${encodeURIComponent(fullPath)}:/content`;
     await graphRequest(token, 'PUT', url, fileBuffer, { 'Content-Type': 'application/octet-stream' });
@@ -577,7 +658,6 @@ async function uploadLarge(token, driveId, fullPath, filePath) {
     }
     fs.closeSync(fd);
 }
-
 async function uploadFile(token, driveId, folderPath, localFilePath) {
     if (!fs.existsSync(localFilePath)) return;
     const name = path.basename(localFilePath);
@@ -591,14 +671,12 @@ async function uploadFile(token, driveId, folderPath, localFilePath) {
         await uploadLarge(token, driveId, fullPath, localFilePath);
     }
 }
-
 async function uploadAgreementToSharePoint(agreement) {
     if (!GRAPH_TENANT || !GRAPH_CLIENT || !GRAPH_SECRET || !SITE_ID || !DRIVE_ID) {
         console.warn('⚠️ Graph env not set; skipping SharePoint upload.');
         return;
     }
     const token = await getAppToken();
-
     const clientFolder = safeFolderName(agreement.businessName || 'Client');
     const segments = [SP_BASE_PATH, clientFolder].filter(Boolean);
     const folderPath = await ensureFolderPath(token, DRIVE_ID, segments);
@@ -621,7 +699,7 @@ async function uploadAgreementToSharePoint(agreement) {
     console.log(`✅ Uploaded final PDFs & signatures to SharePoint: /${folderPath}`);
 }
 
-// ------------------------- helpers -------------------------
+/* ----------------------- helpers ----------------------- */
 function getDirectorEmails() {
     const multi = (process.env.DIRECTOR_EMAILS || '')
         .split(',').map(s => s.trim()).filter(Boolean);
@@ -629,27 +707,27 @@ function getDirectorEmails() {
     return (process.env.DIRECTOR_EMAIL ? [process.env.DIRECTOR_EMAIL] : []);
 }
 
-async function safeSendMail(opts) {
-    try {
-        if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || process.env.MAIL_MODE === 'console') {
-            console.log('✉️  [mail disabled] Would send:', { to: opts.to, subject: opts.subject, text: opts.text });
-            return;
-        }
-        await transporter.sendMail(opts);
-    } catch (err) {
-        console.error('✉️  Mail send failed (non-fatal):', err?.message || err);
-    }
-}
+/* ----------------------- routes ----------------------- */
 
-// ------------------------- routes -------------------------
+// Quick test: verify mail delivery without running the whole flow
+app.post('/api/debug/mail', async (req, res) => {
+    const { to = process.env.EMAIL_USER, subject = 'Mail test', text = 'Hello from backend' } = req.body || {};
+    const result = await safeSendMail({ from: process.env.EMAIL_FROM || process.env.EMAIL_USER, to, subject, text });
+    res.json({ result, transport: {
+            mode: process.env.MAIL_MODE || 'smtp',
+            host: process.env.SMTP_HOST || 'gmail-service',
+            port: process.env.SMTP_PORT || (process.env.SMTP_HOST ? undefined : 'gmail-default')
+        }});
+});
 
+// Save a new client + notify
 app.post('/api/new-client-login', async (req, res) => {
     const { businessName, email, phone } = req.body;
     try {
         await new Client({ businessName, email, phone }).save();
 
         await safeSendMail({
-            from: process.env.EMAIL_USER,
+            from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
             to: process.env.EMAIL_USER,
             subject: '🚀 New Client Logged In',
             text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
@@ -657,7 +735,7 @@ app.post('/api/new-client-login', async (req, res) => {
 
         if (process.env.AGREEMENTS_INBOX) {
             await safeSendMail({
-                from: process.env.EMAIL_USER,
+                from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
                 to: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][NEW-CLIENT] ${businessName}`,
                 text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
@@ -695,7 +773,7 @@ app.post('/api/save-pricing-summary', async (req, res) => {
     }
 });
 
-// Prefill the full pack and email client links
+// Prefill the pack and email client links
 app.post('/api/submit-agreement', async (req, res) => {
     const b = req.body;
     const businessName   = b.CompanyName ?? b.businessName;
@@ -787,7 +865,7 @@ app.post('/api/submit-agreement', async (req, res) => {
 
         const attachments = documents.map(d => ({ filename: `${d.name}-Draft.pdf`, path: d.draftPdfPath }));
         await safeSendMail({
-            from: process.env.EMAIL_USER,
+            from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
             to: newAgreement.email,
             bcc: process.env.AGREEMENTS_INBOX,
             subject: '📄 Your Prefilled Agreement Pack',
@@ -909,7 +987,7 @@ app.post('/api/sign/:token', async (req, res) => {
                 .map(d => ({ filename: `ClientSigned_${d.name}.pdf`, path: d.clientSignedPdfPath }));
 
             await safeSendMail({
-                from: process.env.EMAIL_USER,
+                from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
                 to: email,
                 bcc: process.env.AGREEMENTS_INBOX,
                 subject: `[AGREEMENT][CLIENT-SIGNED] ${ag.businessName}`,
@@ -925,7 +1003,7 @@ app.post('/api/sign/:token', async (req, res) => {
     }
 });
 
-// Debug: what director emails are parsed?
+// Debug: director env
 app.get('/api/debug/directors-env', (req, res) => {
     res.json({
         DIRECTOR_EMAILS: process.env.DIRECTOR_EMAILS || null,
@@ -1006,7 +1084,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
         if (allDirectorsComplete) {
             const attachments = ag.documents.map(d => ({ filename: `Final_${d.name}.pdf`, path: d.finalSignedPdfPath }));
             await safeSendMail({
-                from: process.env.EMAIL_USER,
+                from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
                 to: ag.email,
                 bcc: [...getDirectorEmails(), process.env.AGREEMENTS_INBOX].filter(Boolean).join(','),
                 subject: `[AGREEMENT][FINAL] ${ag.businessName}`,
@@ -1031,7 +1109,7 @@ app.post('/api/sign-director/:token', async (req, res) => {
     }
 });
 
-// ------------------------- Debug endpoints -------------------------
+/* ----------------------- Debug endpoints ----------------------- */
 app.get('/api/debug/agreements', async (req, res) => {
     const ags = await Agreement.find().lean();
     res.json(ags);
@@ -1065,9 +1143,8 @@ app.get('/api/debug/app-env', (req, res) => {
     res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
 });
 
-// ------------------------- Root & start -------------------------
+/* ----------------------- Root & start ----------------------- */
 app.get('/', (req, res) => {
     res.send('Backend is live 🚀');
 });
-
 app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
