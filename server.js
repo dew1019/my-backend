@@ -12,11 +12,11 @@ const axios = require('axios');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
 
-const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/,'');
-
+const PUBLIC_WEB_URL = (process.env.PUBLIC_WEB_URL || 'https://theglobalbpo.vercel.app').replace(/\/+$/, '');
 const app = express();
 const PORT = process.env.PORT || 5003;
 
+// ------------------------- CORS -------------------------
 const allowedOrigins = (process.env.CORS_ORIGINS ||
     'http://localhost:3000,http://localhost:3001,https://theglobalbpo.vercel.app'
 ).split(',').map(s => s.trim());
@@ -47,79 +47,64 @@ mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB error:', err));
 
-// ------------------------- mail transport -------------------------
-const globalAny = global;
+// ------------------------- MAIL (Gmail only) -------------------------
+/**
+ * We force Gmail transport. You MUST set:
+ *  - EMAIL_USER = youraddress@gmail.com
+ *  - EMAIL_PASS = your Gmail App Password (16 chars, not your normal password)
+ */
+function createGmailTransport() {
+    const user = process.env.EMAIL_USER;
+    const pass = process.env.EMAIL_PASS;
 
-// Build nodemailer transport from env
-function createTransportFromEnv() {
-    const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
-
-    if (mode === 'console') {
-        console.log('✉️  MAIL_MODE=console — emails will be logged, not sent.');
+    if (!user || !pass) {
+        console.warn('✉️  EMAIL_USER or EMAIL_PASS missing. Emails will be logged only.');
         return nodemailer.createTransport({ jsonTransport: true });
     }
 
-    if (mode === 'smtp') {
-        const host   = process.env.SMTP_HOST;         // e.g. smtp.sendgrid.net
-        const port   = Number(process.env.SMTP_PORT); // e.g. 587
-        const secure = port === 465;                  // 465 TLS, 587 STARTTLS
-        const user   = process.env.SMTP_USER;         // e.g. "apikey" for SendGrid
-        const pass   = process.env.SMTP_PASS;         // e.g. SG.xxxxx
+    const timeout = Number(process.env.MAIL_TIMEOUT || 12000);
+    console.log(`✉️  Using Gmail for mail (service=gmail, pool=true). From: ${user}`);
 
-        if (!host || !port || !user || !pass) {
-            console.warn('✉️  MAIL_MODE=smtp but SMTP_* vars missing. Falling back to console.');
-            return nodemailer.createTransport({ jsonTransport: true });
-        }
-
-        const timeout = Number(process.env.MAIL_TIMEOUT || 12000); // ms
-
-        console.log(`✉️  MAIL_MODE=smtp → ${host}:${port} secure=${secure}`);
-        return nodemailer.createTransport({
-            host,
-            port,
-            secure,
-            auth: { user, pass },
-            pool: true,
-            maxConnections: 3,
-            maxMessages: 50,
-            connectionTimeout: timeout,
-            greetingTimeout: timeout,
-            socketTimeout: timeout,
-        });
-    }
-
-    if (mode === 'gmail') {
-        // Requires Gmail App Password (not your normal password)
-        const user = process.env.EMAIL_USER;
-        const pass = process.env.EMAIL_PASS;
-        if (!user || !pass) {
-            console.warn('✉️  MAIL_MODE=gmail but EMAIL_USER/EMAIL_PASS missing. Falling back to console.');
-            return nodemailer.createTransport({ jsonTransport: true });
-        }
-        const timeout = Number(process.env.MAIL_TIMEOUT || 12000);
-        console.log('✉️  MAIL_MODE=gmail (Gmail SMTP via service)');
-        return nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user, pass },
-            pool: true,
-            maxConnections: 2,
-            connectionTimeout: timeout,
-            greetingTimeout: timeout,
-            socketTimeout: timeout,
-        });
-    }
-
-    console.warn(`✉️  Unknown MAIL_MODE=${mode}. Falling back to console.`);
-    return nodemailer.createTransport({ jsonTransport: true });
+    return nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user, pass },
+        pool: true,
+        maxConnections: 3,
+        maxMessages: 50,
+        connectionTimeout: timeout,
+        greetingTimeout: timeout,
+        socketTimeout: timeout,
+    });
 }
 
-let transporter = globalAny.__mailer;
-if (!transporter) {
-    transporter = createTransportFromEnv();
-    globalAny.__mailer = transporter;
+const transporter = createGmailTransport();
+
+async function safeSendMail(opts) {
+    try {
+        // Ensure "from" is always set to your Gmail
+        const from = process.env.EMAIL_USER || opts.from;
+        const payload = { ...opts, from };
+
+        // If jsonTransport (no creds), just logs the message as JSON
+        const isJsonTransport = transporter.options && transporter.options.jsonTransport;
+        if (isJsonTransport) {
+            console.log('✉️  [log only] Would send:', {
+                to: payload.to,
+                bcc: payload.bcc,
+                subject: payload.subject,
+                text: payload.text
+            });
+            return;
+        }
+
+        await transporter.sendMail(payload);
+    } catch (err) {
+        // Common Gmail auth errors: 535 or 'Invalid login'
+        console.error('✉️  Mail send failed:', err?.message || err);
+    }
 }
 
-// ------------------------- schemas -------------------------
+// ------------------------- Schemas/Models -------------------------
 const clientSchema = new mongoose.Schema({
     businessName: String,
     email: String,
@@ -130,14 +115,14 @@ const clientSchema = new mongoose.Schema({
 const directorSlotSchema = new mongoose.Schema({
     label: String,
     email: String,
-    directorSignToken: String,  // legacy name
-    signToken: String,          // new name
+    directorSignToken: String, // legacy
+    signToken: String,         // new
     signatureImagePath: String,
     signature: String,
     signed: { type: Boolean, default: false },
     signedDate: Date,
     signedPdfPath: String,
-},{ _id: false });
+}, { _id: false });
 
 const agreementDocumentSchema = new mongoose.Schema({
     name: String,
@@ -161,7 +146,7 @@ const agreementDocumentSchema = new mongoose.Schema({
 
     // multi-director
     directors: [directorSlotSchema],
-},{ _id: false });
+}, { _id: false });
 
 const agreementSchema = new mongoose.Schema({
     // canonical fields
@@ -306,12 +291,12 @@ async function drawFieldsOnPdf(templatePath, fieldMap, inputData, outPath) {
     }
 
     function drawOnePlacement(p, spec, value) {
-        const { size = 10, color = rgb(0,0,0), maxWidth, lineHeight = 1.2 } = spec;
+        const { size = 10, color = rgb(0, 0, 0), maxWidth, lineHeight = 1.2 } = spec;
         let { x, y } = spec;
         if (spec.origin === 'top-left') y = p.getHeight() - spec.y;
         if (maxWidth) {
             const lines = wrapLines(value, size, maxWidth);
-            lines.forEach((line, i) => p.drawText(line, { x, y: y - i*(size*lineHeight), size, font, color }));
+            lines.forEach((line, i) => p.drawText(line, { x, y: y - i * (size * lineHeight), size, font, color }));
         } else {
             p.drawText(value, { x, y, size, font, color });
         }
@@ -344,7 +329,7 @@ async function stampSignatureWithTime(inPath, signatureDataUrl, templateCoords, 
 
     p.drawImage(png, { x, y, width, height });
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    p.drawText(`${label}: ${nowLocal()}`, { x, y: y - 14, size: 10, font, color: rgb(0,0,0) });
+    p.drawText(`${label}: ${nowLocal()}`, { x, y: y - 14, size: 10, font, color: rgb(0, 0, 0) });
 
     fs.writeFileSync(outPath, await pdfDoc.save());
     return outPath;
@@ -357,43 +342,43 @@ const TEMPLATES = [
         path: 'Engagement-letter.pdf',
         fieldMap: {
             companyName: [
-                { page: 1, x: 40,  y: 486, size: 11, origin: 'top-left' },
+                { page: 1, x: 40, y: 486, size: 11, origin: 'top-left' },
                 { page: 1, x: 110, y: 378, size: 11, origin: 'top-left' },
             ],
-            addressLine1: { page: 1, x: 41,   y: 463, size: 10, origin: 'top-left' },
+            addressLine1: { page: 1, x: 41, y: 463, size: 10, origin: 'top-left' },
             addressLine2: { page: 1, x: 41.5, y: 440, size: 10, origin: 'top-left' },
 
-            businessName:      { page: 2, x: 171, y: 563, size: 10, origin: 'top-left' },
-            clientFullName:    { page: 2, x: 171, y: 484, size: 10, origin: 'top-left' },
-            clientEmail:       { page: 2, x: 169, y: 450, size: 10, origin: 'top-left', maxWidth: 260 },
-            registeredOffice:  { page: 2, x: 171, y: 395, size: 10, origin: 'top-left' },
-            postalAddress:     { page: 2, x: 171, y: 347, size: 10, origin: 'top-left' },
-            businessAddress:   { page: 2, x: 171, y: 297, size: 10, origin: 'top-left' },
+            businessName: { page: 2, x: 171, y: 563, size: 10, origin: 'top-left' },
+            clientFullName: { page: 2, x: 171, y: 484, size: 10, origin: 'top-left' },
+            clientEmail: { page: 2, x: 169, y: 450, size: 10, origin: 'top-left', maxWidth: 260 },
+            registeredOffice: { page: 2, x: 171, y: 395, size: 10, origin: 'top-left' },
+            postalAddress: { page: 2, x: 171, y: 347, size: 10, origin: 'top-left' },
+            businessAddress: { page: 2, x: 171, y: 297, size: 10, origin: 'top-left' },
             departmentContact: { page: 2, x: 171, y: 259, size: 10, origin: 'top-left' },
-            directorName:      { page: 2, x: 171, y: 217, size: 10, origin: 'top-left' },
+            directorName: { page: 2, x: 171, y: 217, size: 10, origin: 'top-left' },
 
-            ACN:          { page: 2, x: 405, y: 566, size: 10, origin: 'top-left' },
-            ABN:          { page: 2, x: 405, y: 521, size: 10, origin: 'top-left' },
+            ACN: { page: 2, x: 405, y: 566, size: 10, origin: 'top-left' },
+            ABN: { page: 2, x: 405, y: 521, size: 10, origin: 'top-left' },
             mobileNumber: { page: 2, x: 405, y: 484, size: 10, origin: 'top-left' },
             officeNumber: { page: 2, x: 405, y: 450, size: 10, origin: 'top-left' },
-            postCode:     { page: 2, x: 405, y: 396, size: 10, origin: 'top-left' },
+            postCode: { page: 2, x: 405, y: 396, size: 10, origin: 'top-left' },
 
-            agreedFee:    { page: 3, x: 182, y: 508, size: 10, origin: 'top-left' },
-            contractStart:{ page: 3, x: 182, y: 428, size: 10, origin: 'top-left' },
+            agreedFee: { page: 3, x: 182, y: 508, size: 10, origin: 'top-left' },
+            contractStart: { page: 3, x: 182, y: 428, size: 10, origin: 'top-left' },
 
-            mainService:     { page: 4, x: 319, y: 554, size: 11, origin: 'top-left' },
-            p4CompanyName:   { page: 4, x: 288, y: 524, size: 10, origin: 'top-left' },
-            servicesAssist:  { page: 4, x: 365, y: 501, size: 10, origin: 'top-left' },
-            p5ClientName:    { page: 5, x: 81,  y: 150, size: 10, origin: 'top-left' },
-            p5Date1:         { page: 5, x: 79,  y: 114, size: 10, origin: 'top-left' },
-            p5OtherName:     { page: 5, x: 403, y: 149, size: 10, origin: 'top-left' },
-            p5Date2:         { page: 5, x: 402, y: 116, size: 10, origin: 'top-left' },
+            mainService: { page: 4, x: 319, y: 554, size: 11, origin: 'top-left' },
+            p4CompanyName: { page: 4, x: 288, y: 524, size: 10, origin: 'top-left' },
+            servicesAssist: { page: 4, x: 365, y: 501, size: 10, origin: 'top-left' },
+            p5ClientName: { page: 5, x: 81, y: 150, size: 10, origin: 'top-left' },
+            p5Date1: { page: 5, x: 79, y: 114, size: 10, origin: 'top-left' },
+            p5OtherName: { page: 5, x: 403, y: 149, size: 10, origin: 'top-left' },
+            p5Date2: { page: 5, x: 402, y: 116, size: 10, origin: 'top-left' },
 
             guarantorCompany: { page: 6, x: 388, y: 616, size: 10, origin: 'top-left' },
-            guarantorACNABN:  { page: 6, x: 101, y: 605, size: 10, origin: 'top-left' },
+            guarantorACNABN: { page: 6, x: 101, y: 605, size: 10, origin: 'top-left' },
         },
-        clientSig:   { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 6, x: 338, y:  72, width: 150, height: 50, origin: 'top-left' },
+        clientSig: { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 6, x: 338, y: 72, width: 150, height: 50, origin: 'top-left' },
     },
 
     {
@@ -404,26 +389,26 @@ const TEMPLATES = [
             ACN: { page: 1, x: 101, y: 605, size: 10, origin: 'top-left' },
             ABN: { page: 1, x: 101, y: 563, size: 10, origin: 'top-left' },
             directorName: { page: 1, x: 384, y: 102, size: 10, origin: 'top-left' },
-            submittedAt:  { page: 1, x: 338, y:  74, size: 10, origin: 'top-left' },
+            submittedAt: { page: 1, x: 338, y: 74, size: 10, origin: 'top-left' },
         },
-        clientSig:   { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 6, x:  64, y: 466, width: 150, height: 50, origin: 'top-left' },
-        director1Sig:{ page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
+        clientSig: { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 6, x: 64, y: 466, width: 150, height: 50, origin: 'top-left' },
+        director1Sig: { page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
     },
 
     {
         name: 'PricingSchedule',
         path: 'privacy-policy.pdf',
         fieldMap: {
-            businessName:   { page: 1, x: 150, y: 660, size: 10, origin: 'top-left' },
-            service:        { page: 1, x: 150, y: 640, size: 10, origin: 'top-left' },
-            planName:       { page: 1, x: 150, y: 620, size: 10, origin: 'top-left' },
-            planPrice:      { page: 1, x: 420, y: 620, size: 10, origin: 'top-left' },
-            addOnsSummary:  { page: 1, x: 150, y: 600, size: 10, origin: 'top-left', maxWidth: 360 },
-            total:          { page: 1, x: 420, y: 580, size: 12, origin: 'top-left' },
+            businessName: { page: 1, x: 150, y: 660, size: 10, origin: 'top-left' },
+            service: { page: 1, x: 150, y: 640, size: 10, origin: 'top-left' },
+            planName: { page: 1, x: 150, y: 620, size: 10, origin: 'top-left' },
+            planPrice: { page: 1, x: 420, y: 620, size: 10, origin: 'top-left' },
+            addOnsSummary: { page: 1, x: 150, y: 600, size: 10, origin: 'top-left', maxWidth: 360 },
+            total: { page: 1, x: 420, y: 580, size: 12, origin: 'top-left' },
         },
-        clientSig:   { page: 6, x: 420, y:  90, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 6, x: 420, y:  40, width: 150, height: 50, origin: 'top-left' },
+        clientSig: { page: 6, x: 420, y: 90, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 6, x: 420, y: 40, width: 150, height: 50, origin: 'top-left' },
     },
 
     {
@@ -431,13 +416,13 @@ const TEMPLATES = [
         path: 'terms.pdf',
         fieldMap: {
             businessName: { page: 4, x: 120, y: 362, size: 10, origin: 'top-left' },
-            date:         { page: 4, x: 430, y: 630, size: 10, origin: 'top-left' },
-            ACN:          { page: 4, x: 406, y: 608, size: 10, origin: 'top-left' },
-            ABN:          { page: 4, x: 406, y: 563, size: 10, origin: 'top-left' },
+            date: { page: 4, x: 430, y: 630, size: 10, origin: 'top-left' },
+            ACN: { page: 4, x: 406, y: 608, size: 10, origin: 'top-left' },
+            ABN: { page: 4, x: 406, y: 563, size: 10, origin: 'top-left' },
         },
-        clientSig:   { page: 6, x: 380, y: 80, width: 150, height: 50, origin: 'top-left' },
-        directorSig: { page: 4, x:  63, y: 466, width: 150, height: 50, origin: 'top-left' },
-        director1Sig:{ page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
+        clientSig: { page: 6, x: 380, y: 80, width: 150, height: 50, origin: 'top-left' },
+        directorSig: { page: 4, x: 63, y: 466, width: 150, height: 50, origin: 'top-left' },
+        director1Sig: { page: 4, x: 350, y: 466, width: 150, height: 50, origin: 'top-left' },
     },
 ];
 
@@ -461,70 +446,70 @@ async function ensureDraftExists(agreement, doc) {
 // ------------------------- Template input mapping -------------------------
 function buildTemplateInput(templateName, agreementData, summaryData) {
     const base = {
-        businessName:       agreementData.businessName || '',
-        tradingName:        agreementData.tradingName || '',
-        clientFullName:     agreementData.clientFullName || '',
-        dateOfBirth:        agreementData.dateOfBirth || '',
-        email:              agreementData.email || '',
-        phone:              agreementData.phone || '',
-        registeredOffice:   agreementData.registeredOffice || '',
+        businessName: agreementData.businessName || '',
+        tradingName: agreementData.tradingName || '',
+        clientFullName: agreementData.clientFullName || '',
+        dateOfBirth: agreementData.dateOfBirth || '',
+        email: agreementData.email || '',
+        phone: agreementData.phone || '',
+        registeredOffice: agreementData.registeredOffice || '',
         registeredPostCode: agreementData.registeredPostCode || '',
-        postalAddress:      agreementData.postalAddress || '',
-        postalPostCode:     agreementData.postalPostCode || '',
-        businessAddress:    agreementData.businessAddress || '',
-        businessPostCode:   agreementData.businessPostCode || '',
-        departmentContact:  agreementData.departmentContact || '',
-        contactNumber:      agreementData.contactNumber || '',
-        departmentEmail:    agreementData.departmentEmail || '',
-        officeNumber:       agreementData.officeNumber || '',
-        nameOfDirector:     agreementData.nameOfDirector || '',
-        addressOfDirector:  agreementData.addressOfDirector || '',
-        driversLicense:     agreementData.driversLicense || '',
-        acn_abn:            agreementData.acn_abn || '',
-        mainService:        agreementData.mainService || '',
-        contractStart:      agreementData.contractStartDate || '',
-        contractStartDate:  agreementData.contractStartDate || '',
+        postalAddress: agreementData.postalAddress || '',
+        postalPostCode: agreementData.postalPostCode || '',
+        businessAddress: agreementData.businessAddress || '',
+        businessPostCode: agreementData.businessPostCode || '',
+        departmentContact: agreementData.departmentContact || '',
+        contactNumber: agreementData.contactNumber || '',
+        departmentEmail: agreementData.departmentEmail || '',
+        officeNumber: agreementData.officeNumber || '',
+        nameOfDirector: agreementData.nameOfDirector || '',
+        addressOfDirector: agreementData.addressOfDirector || '',
+        driversLicense: agreementData.driversLicense || '',
+        acn_abn: agreementData.acn_abn || '',
+        mainService: agreementData.mainService || '',
+        contractStart: agreementData.contractStartDate || '',
+        contractStartDate: agreementData.contractStartDate || '',
 
-        businessType:       agreementData.businessType || '',
-        ACN:                agreementData.ACN || '',
-        ABN:                agreementData.ABN || '',
-        address:            agreementData.address || '',
-        city:               agreementData.city || '',
-        state:              agreementData.state || '',
-        postalCode:         agreementData.postalCode || '',
-        website:            agreementData.website || '',
-        additionalNotes:    agreementData.additionalNotes || '',
+        businessType: agreementData.businessType || '',
+        ACN: agreementData.ACN || '',
+        ABN: agreementData.ABN || '',
+        address: agreementData.address || '',
+        city: agreementData.city || '',
+        state: agreementData.state || '',
+        postalCode: agreementData.postalCode || '',
+        website: agreementData.website || '',
+        additionalNotes: agreementData.additionalNotes || '',
 
         submittedAt: new Date(agreementData.submittedAt || Date.now()).toLocaleString(),
     };
 
     // aliases
-    base.companyName   = base.businessName;
-    base.dearName      = base.businessName;
-    base.customerName  = base.businessName;
-    base.clientEmail   = base.email;
-    base.mobileNumber  = base.phone;
-    base.postCode      = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
+    base.companyName = base.businessName;
+    base.dearName = base.businessName;
+    base.customerName = base.businessName;
+    base.clientEmail = base.email;
+    base.mobileNumber = base.phone;
+    base.postCode = base.registeredPostCode || base.postalPostCode || base.businessPostCode || '';
     base.p4CompanyName = base.businessName;
-    base.servicesAssist= base.mainService || '';
-    base.directorName  = base.nameOfDirector;
-    base.p5ClientName  = base.clientFullName;
-    base.p5OtherName   = base.directorName;
+    base.servicesAssist = base.mainService || '';
+    base.directorName = base.nameOfDirector;
+    base.p5ClientName = base.clientFullName;
+    base.p5OtherName = base.directorName;
 
     const dateOnly = base.submittedAt.split(',')[0];
     base.p5Date1 = dateOnly;
     base.p5Date2 = dateOnly;
 
     base.guarantorCompany = base.businessName;
-    base.guarantorACNABN  = base.ACN || base.ABN || base.acn_abn;
+    base.guarantorACNABN = base.ACN || base.ABN || base.acn_abn;
 
     if (templateName === 'PricingSchedule' && summaryData) {
         const addOnsSummary = (summaryData.addOns || []).map(a => `${a.name} ($${a.price})`).join(', ');
-        base.service       = summaryData.service || base.servicesAssist || '';
-        base.planName      = summaryData.plan?.name || '';
-        base.planPrice     = typeof summaryData.plan?.price === 'number' ? `$${summaryData.plan.price.toFixed(2)}` : '';
+        base.service = summaryData.service || base.servicesAssist || '';
+        base.planName = summaryData.plan?.name || '';
+        base.planPrice = typeof summaryData.plan?.price === 'number' ? `$${summaryData.plan.price.toFixed(2)}` : '';
         base.addOnsSummary = addOnsSummary;
-        base.total         = typeof summaryData.total === 'number' ? `$${summaryData.total.toFixed(2)}` : '';
+        base.total = typeof summaryData.total === 'number' ? `$${summaryData.total.toFixed(2)}` : '';
     }
 
     if (templateName === 'ConfidentialityAgreement') base.executedDate = new Date().toLocaleDateString();
@@ -545,12 +530,13 @@ function getDirectorSigSpec(template, directorIndex) {
     return template.directorSig || template.director1Sig || null;
 }
 
-// ------------------------- Microsoft Graph (optional) -------------------------
+// ------------------------- (Optional) Microsoft Graph upload -------------------------
+// (Left intact; add envs only if you plan to use SharePoint)
 const GRAPH_TENANT = (process.env.GRAPH_TENANT_ID || '').trim();
 const GRAPH_CLIENT = (process.env.GRAPH_CLIENT_ID || '').trim();
 const GRAPH_SECRET = (process.env.GRAPH_CLIENT_SECRET || '').trim();
-const SITE_ID      = (process.env.GRAPH_SITE_ID || '').trim();
-const DRIVE_ID     = (process.env.GRAPH_DRIVE_ID || '').trim();
+const SITE_ID = (process.env.GRAPH_SITE_ID || '').trim();
+const DRIVE_ID = (process.env.GRAPH_DRIVE_ID || '').trim();
 const SP_BASE_PATH = (process.env.SP_BASE_PATH || 'Agreements').replace(/^\/|\/$/g, '');
 
 app.get('/api/debug/graph-env', (req, res) => {
@@ -690,31 +676,7 @@ function getDirectorEmails() {
     return (process.env.DIRECTOR_EMAIL ? [process.env.DIRECTOR_EMAIL] : []);
 }
 
-async function safeSendMail(opts) {
-    const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
-    try {
-        if (mode === 'console') {
-            console.log('✉️  [mail disabled] Would send:', {
-                to: opts.to, subject: opts.subject, text: opts.text
-            });
-            return;
-        }
-        const defaultFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || process.env.SMTP_FROM || 'no-reply@localhost';
-        const final = { from: opts.from || defaultFrom, ...opts };
-
-        await transporter.sendMail(final);
-        console.log('✉️  Mail queued:', { to: final.to, subject: final.subject });
-    } catch (err) {
-        const msg = err?.message || String(err);
-        const hint = /ETIMEDOUT|timeout|ECONNREFUSED|EHOSTUNREACH|blocked/i.test(msg)
-            ? '💡 Hint: Your host may block SMTP 465/587. Use a provider/relay reachable from your host, or switch hosts.'
-            : '';
-        console.error(`✉️  Mail send failed: ${msg}${hint ? '\n' + hint : ''}`);
-    }
-}
-
 // ------------------------- routes -------------------------
-
 app.post('/api/new-client-login', async (req, res) => {
     const { businessName, email, phone } = req.body;
     try {
@@ -768,57 +730,57 @@ app.post('/api/save-pricing-summary', async (req, res) => {
 // Prefill the full pack and email client links
 app.post('/api/submit-agreement', async (req, res) => {
     const b = req.body;
-    const businessName   = b.CompanyName ?? b.businessName;
+    const businessName = b.CompanyName ?? b.businessName;
     const clientFullName = b.ClientFullName ?? b.clientFullName;
-    const email          = b.ClientEmail ?? b.email;
-    const phone          = b.MobileNumber ?? b.phone;
+    const email = b.ClientEmail ?? b.email;
+    const phone = b.MobileNumber ?? b.phone;
 
     if (![businessName, clientFullName, email, phone].every(v => v && String(v).trim()))
         return res.status(400).json({ message: 'Missing required fields (businessName, clientFullName, email, phone).' });
 
     try {
         const idDigits = String(b.ACN_ABN || '').replace(/\D/g, '');
-        const ACN = idDigits.length === 9  ? idDigits : (b.ACN || '');
+        const ACN = idDigits.length === 9 ? idDigits : (b.ACN || '');
         const ABN = idDigits.length === 11 ? idDigits : (b.ABN || '');
 
         const payload = {
             businessName,
-            tradingName:        b.TradingName ?? b.tradingName ?? '',
+            tradingName: b.TradingName ?? b.tradingName ?? '',
             clientFullName,
-            dateOfBirth:        b.DateOfBirth ?? b.dateOfBirth ?? '',
+            dateOfBirth: b.DateOfBirth ?? b.dateOfBirth ?? '',
             email,
             phone,
 
-            registeredOffice:   b.RegisteredOffice ?? b.registeredOffice ?? '',
+            registeredOffice: b.RegisteredOffice ?? b.registeredOffice ?? '',
             registeredPostCode: b.RegisteredPostCode ?? b.registeredPostCode ?? '',
-            postalAddress:      b.PostalAddress ?? b.postalAddress ?? '',
-            postalPostCode:     b.PostalPostCode ?? b.postalPostCode ?? '',
-            businessAddress:    b.BusinessAddress ?? b.businessAddress ?? '',
-            businessPostCode:   b.BusinessPostCode ?? b.businessPostCode ?? '',
+            postalAddress: b.PostalAddress ?? b.postalAddress ?? '',
+            postalPostCode: b.PostalPostCode ?? b.postalPostCode ?? '',
+            businessAddress: b.BusinessAddress ?? b.businessAddress ?? '',
+            businessPostCode: b.BusinessPostCode ?? b.businessPostCode ?? '',
 
-            departmentContact:  b.DepartmentContact ?? b.departmentContact ?? '',
-            contactNumber:      b.ContactNumber ?? b.contactNumber ?? '',
-            departmentEmail:    b.DepartmentEmail ?? b.departmentEmail ?? '',
-            officeNumber:       b.OfficeNumber ?? b.officeNumber ?? '',
+            departmentContact: b.DepartmentContact ?? b.departmentContact ?? '',
+            contactNumber: b.ContactNumber ?? b.contactNumber ?? '',
+            departmentEmail: b.DepartmentEmail ?? b.departmentEmail ?? '',
+            officeNumber: b.OfficeNumber ?? b.officeNumber ?? '',
 
-            nameOfDirector:     b.NameOfDirector ?? b.nameOfDirector ?? '',
-            addressOfDirector:  b.AddressOfDirector ?? b.addressOfDirector ?? '',
-            driversLicense:     b.DriversLicense ?? b.driversLicense ?? '',
+            nameOfDirector: b.NameOfDirector ?? b.nameOfDirector ?? '',
+            addressOfDirector: b.AddressOfDirector ?? b.addressOfDirector ?? '',
+            driversLicense: b.DriversLicense ?? b.driversLicense ?? '',
 
-            acn_abn:            b.ACN_ABN ?? `${b.ACN || ''}${b.ABN ? ' / ' + b.ABN : ''}`,
+            acn_abn: b.ACN_ABN ?? `${b.ACN || ''}${b.ABN ? ' / ' + b.ABN : ''}`,
             ACN, ABN,
 
-            mainService:        b.MainService ?? b.mainService ?? '',
-            contractStartDate:  b.ContractStartDate ?? b.contractStartDate ?? '',
-            JobType:            b.JobType ?? b.jobType ?? '',
+            mainService: b.MainService ?? b.mainService ?? '',
+            contractStartDate: b.ContractStartDate ?? b.contractStartDate ?? '',
+            JobType: b.JobType ?? b.jobType ?? '',
 
-            businessType:       b.businessType ?? '',
-            address:            b.address ?? '',
-            city:               b.city ?? '',
-            state:              b.state ?? '',
-            postalCode:         b.postalCode ?? '',
-            website:            b.website ?? '',
-            additionalNotes:    b.additionalNotes ?? '',
+            businessType: b.businessType ?? '',
+            address: b.address ?? '',
+            city: b.city ?? '',
+            state: b.state ?? '',
+            postalCode: b.postalCode ?? '',
+            website: b.website ?? '',
+            additionalNotes: b.additionalNotes ?? '',
 
             submittedAt: new Date(),
         };
@@ -1103,6 +1065,7 @@ app.get('/api/debug/agreements', async (req, res) => {
     const ags = await Agreement.find().lean();
     res.json(ags);
 });
+
 app.post('/api/debug/graph-upload', async (req, res) => {
     try {
         if (!GRAPH_TENANT || !GRAPH_CLIENT || !GRAPH_SECRET || !DRIVE_ID || !PUBLIC_WEB_URL) {
@@ -1126,24 +1089,21 @@ app.post('/api/debug/graph-upload', async (req, res) => {
         res.status(500).json({ message: 'Graph upload failed', error: e?.response?.data || e.message || String(e) });
     }
 });
+
 app.get('/api/debug/app-env', (req, res) => {
     const pub = (process.env.PUBLIC_WEB_URL || '').toString();
     const cors = (process.env.CORS_ORIGINS || '').toString();
     res.json({ PUBLIC_WEB_URL: pub, CORS_ORIGINS: cors });
 });
 
-// -------- Mail debug helpers --------
+// Quick mail sanity endpoints
 app.get('/api/debug/mail-env', (req, res) => {
-    const mode = (process.env.MAIL_MODE || 'console').toLowerCase();
+    const isJson = !!(transporter.options && transporter.options.jsonTransport);
     res.json({
-        MAIL_MODE: mode,
-        EMAIL_USER: !!process.env.EMAIL_USER,
-        EMAIL_PASS: !!process.env.EMAIL_PASS,
-        SMTP_HOST: process.env.SMTP_HOST || null,
-        SMTP_PORT: process.env.SMTP_PORT || null,
-        SMTP_USER: process.env.SMTP_USER ? '(set)' : null,
-        SMTP_PASS: process.env.SMTP_PASS ? '(set)' : null,
-        MAIL_TIMEOUT: process.env.MAIL_TIMEOUT || '12000',
+        TRANSPORT: isJson ? 'json (log-only)' : 'gmail',
+        EMAIL_USER: process.env.EMAIL_USER || null,
+        EMAIL_PASS_SET: !!process.env.EMAIL_PASS,
+        MAIL_TIMEOUT: process.env.MAIL_TIMEOUT || '12000'
     });
 });
 
@@ -1152,8 +1112,8 @@ app.post('/api/debug/mail-test', async (req, res) => {
     try {
         await safeSendMail({
             to,
-            subject: 'Mail test from backend',
-            text: 'If you see this, your SMTP transport works.'
+            subject: 'Mail test (Gmail transport)',
+            text: 'If you see this, Gmail transport works.'
         });
         res.json({ ok: true, to });
     } catch (e) {
