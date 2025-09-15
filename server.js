@@ -309,41 +309,57 @@ const TEMPLATES = [
         name: 'ServiceAgreement',
         path: 'Engagement-letter.pdf',
         fieldMap: {
-            companyName: [
-                { page: 1, x: 40,  y: 486, size: 11, origin: 'top-left' },
-                { page: 1, x: 110, y: 378, size: 11, origin: 'top-left' },
-            ],
-            addressLine1: { page: 1, x: 41,   y: 463, size: 10, origin: 'top-left' },
-            addressLine2: { page: 1, x: 41.5, y: 440, size: 10, origin: 'top-left' },
-
+            // Company/Client info
             businessName:      { page: 2, x: 171, y: 563, size: 10, origin: 'top-left' },
+            tradingName:       { page: 2, x: 171, y: 540, size: 10, origin: 'top-left' },
             clientFullName:    { page: 2, x: 171, y: 484, size: 10, origin: 'top-left' },
-            clientEmail:       { page: 2, x: 169, y: 450, size: 10, origin: 'top-left', maxWidth: 260 },
-            registeredOffice:  { page: 2, x: 171, y: 395, size: 10, origin: 'top-left' },
-            postalAddress:     { page: 2, x: 171, y: 347, size: 10, origin: 'top-left' },
-            businessAddress:   { page: 2, x: 171, y: 297, size: 10, origin: 'top-left' },
-            departmentContact: { page: 2, x: 171, y: 259, size: 10, origin: 'top-left' },
-            directorName:      { page: 2, x: 171, y: 217, size: 10, origin: 'top-left' },
+            dateOfBirth:       { page: 2, x: 171, y: 462, size: 10, origin: 'top-left' },
+            email:             { page: 2, x: 169, y: 450, size: 10, origin: 'top-left', maxWidth: 260 },
+            phone:             { page: 2, x: 405, y: 484, size: 10, origin: 'top-left' },
 
+            // Address fields
+            registeredOffice:  { page: 2, x: 171, y: 395, size: 10, origin: 'top-left' },
+            registeredPostCode:{ page: 2, x: 405, y: 395, size: 10, origin: 'top-left' },
+            postalAddress:     { page: 2, x: 171, y: 347, size: 10, origin: 'top-left' },
+            postalPostCode:    { page: 2, x: 405, y: 347, size: 10, origin: 'top-left' },
+            businessAddress:   { page: 2, x: 171, y: 297, size: 10, origin: 'top-left' },
+            businessPostCode:  { page: 2, x: 405, y: 297, size: 10, origin: 'top-left' },
+
+            // Department contacts
+            departmentContact: { page: 2, x: 171, y: 259, size: 10, origin: 'top-left' },
+            contactNumber:     { page: 2, x: 405, y: 259, size: 10, origin: 'top-left' },
+            departmentEmail:   { page: 2, x: 171, y: 237, size: 10, origin: 'top-left' },
+            officeNumber:      { page: 2, x: 405, y: 450, size: 10, origin: 'top-left' },
+
+            // Directors
+            nameOfDirector:    { page: 2, x: 171, y: 217, size: 10, origin: 'top-left' },
+            addressOfDirector: { page: 2, x: 405, y: 217, size: 10, origin: 'top-left' },
+            driversLicense:    { page: 2, x: 171, y: 195, size: 10, origin: 'top-left' },
+
+            // Business identifiers
             ACN:          { page: 2, x: 405, y: 566, size: 10, origin: 'top-left' },
             ABN:          { page: 2, x: 405, y: 521, size: 10, origin: 'top-left' },
-            mobileNumber: { page: 2, x: 405, y: 484, size: 10, origin: 'top-left' },
-            officeNumber: { page: 2, x: 405, y: 450, size: 10, origin: 'top-left' },
-            postCode:     { page: 2, x: 405, y: 396, size: 10, origin: 'top-left' },
+            acn_abn:      { page: 2, x: 171, y: 170, size: 10, origin: 'top-left' },
 
-            agreedFee:    { page: 3, x: 182, y: 508, size: 10, origin: 'top-left' },
-            contractStart:{ page: 3, x: 182, y: 428, size: 10, origin: 'top-left' },
+            // Service + Contract
+            mainService:      { page: 4, x: 319, y: 554, size: 11, origin: 'top-left' },
+            contractStartDate:{ page: 3, x: 182, y: 428, size: 10, origin: 'top-left' },
+            JobType:          { page: 3, x: 182, y: 400, size: 10, origin: 'top-left' },
 
-            mainService:     { page: 4, x: 319, y: 554, size: 11, origin: 'top-left' },
-            p4CompanyName:   { page: 4, x: 288, y: 524, size: 10, origin: 'top-left' },
-            servicesAssist:  { page: 4, x: 365, y: 501, size: 10, origin: 'top-left' },
-            p5ClientName:    { page: 5, x: 81,  y: 150, size: 10, origin: 'top-left' },
-            p5Date1:         { page: 5, x: 79,  y: 114, size: 10, origin: 'top-left' },
-            p5OtherName:     { page: 5, x: 403, y: 149, size: 10, origin: 'top-left' },
-            p5Date2:         { page: 5, x: 402, y: 116, size: 10, origin: 'top-left' },
+            // Extra business details
+            businessType:   { page: 2, x: 171, y: 150, size: 10, origin: 'top-left' },
+            address:        { page: 2, x: 171, y: 130, size: 10, origin: 'top-left' },
+            city:           { page: 2, x: 171, y: 110, size: 10, origin: 'top-left' },
+            state:          { page: 2, x: 171, y: 90,  size: 10, origin: 'top-left' },
+            postalCode:     { page: 2, x: 405, y: 90,  size: 10, origin: 'top-left' },
+            website:        { page: 2, x: 171, y: 70,  size: 10, origin: 'top-left' },
+            additionalNotes:{ page: 2, x: 171, y: 50,  size: 10, origin: 'top-left', maxWidth: 260 },
 
-            guarantorCompany: { page: 6, x: 388, y: 616, size: 10, origin: 'top-left' },
-            guarantorACNABN:  { page: 6, x: 101, y: 605, size: 10, origin: 'top-left' },
+            // ✅ Summary values in FIRST PDF
+            planName:    { page: 1, x: 150, y: 620, size: 10, origin: 'top-left' },
+            planPrice:   { page: 1, x: 420, y: 620, size: 10, origin: 'top-left' },
+            addOns:      { page: 1, x: 150, y: 600, size: 10, origin: 'top-left', maxWidth: 360 },
+            total:       { page: 1, x: 420, y: 580, size: 12, origin: 'top-left' }, // summary total
         },
         clientSig:   { page: 6, x: 338, y: 125, width: 150, height: 50, origin: 'top-left' },
         directorSig: { page: 6, x: 338, y:  72, width: 150, height: 50, origin: 'top-left' },
