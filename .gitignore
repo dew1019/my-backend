@@ -1,0 +1,7 @@
+node_modules/
+.env
+pdfs/
+signatures/
+uploads/
+*.pdf
+!pdf-templates/**/*.pdf
