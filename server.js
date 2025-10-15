@@ -37,15 +37,13 @@ function originAllowed(origin) {
     try {
         const u = new URL(origin);
         if (allowedSet.has(origin)) return true;
-        // Allow Vercel previews like https://*.vercel.app
-        if (u.hostname.endsWith('.vercel.app')) return true;
-        if (u.hostname === 'www.theglobalbpo.com') return true;
-        return false;
+        if (u.hostname.endsWith('.vercel.app')) return true; // Vercel previews
+        return u.hostname === 'www.theglobalbpo.com';
+
     } catch {
         return allowedSet.has(origin);
     }
 }
-
 app.use(cors({
     origin: (origin, cb) => cb(null, originAllowed(origin)),
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -53,7 +51,6 @@ app.use(cors({
     credentials: true,
     optionsSuccessStatus: 204
 }));
-
 app.use(bodyParser.json({ limit: '25mb' }));
 
 /* ------------------------- Storage ------------------------- */
@@ -69,54 +66,65 @@ mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 15000 })
     .then(() => console.log('✅ Connected to MongoDB'))
     .catch(err => console.error('❌ MongoDB error:', err?.message || err));
 
-/* ------------------------- Mailer (Prod: SendGrid, Dev: Gmail) ------------------------- */
-let sendMailImpl;
-if (process.env.SENDGRID_API_KEY) {
-    const sg = require('@sendgrid/mail');
-    sg.setApiKey(process.env.SENDGRID_API_KEY);
-    const MAIL_FROM = process.env.MAIL_FROM || process.env.EMAIL_USER || 'no-reply@theglobalbpo.com';
+/* ------------------------- Mailer: Gmail-only, with fallback + retries ------------------------- */
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
 
-    sendMailImpl = async ({ to, subject, text, html, attachments }) => {
-        const files = (attachments || []).map(a => ({
-            content: fs.readFileSync(a.path).toString('base64'),
-            filename: a.filename,
-            type: 'application/pdf',
-            disposition: 'attachment'
-        }));
-        await sg.send({
-            to,
-            from: MAIL_FROM,
-            subject,
-            text,
-            html,
-            attachments: files
-        });
-    };
-} else {
-    // Local/dev Gmail via SMTP (App Password required). In prod this may be blocked by host firewalls.
-    const user = process.env.EMAIL_USER;
-    const pass = process.env.EMAIL_PASS;
-    const gmailTransport = (user && pass)
-        ? nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user, pass },
-            pool: true,
-            maxConnections: 2,
-            connectionTimeout: 12000,
-            greetingTimeout: 12000,
-            socketTimeout: 12000,
-        })
-        : nodemailer.createTransport({ jsonTransport: true });
+const make587 = () => nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,           // STARTTLS
+    secure: false,
+    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    pool: false,         // one message per connection (shared hosts hate pools)
+    connectionTimeout: 30000,
+    socketTimeout: 30000,
+    tls: { ciphers: 'TLSv1.2' }
+});
 
-    sendMailImpl = async (opts) => {
-        await gmailTransport.sendMail({ from: process.env.EMAIL_USER, ...opts });
-    };
+const make465 = () => nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,           // SMTPS
+    secure: true,
+    auth: { user: EMAIL_USER, pass: EMAIL_PASS },
+    pool: false,
+    connectionTimeout: 30000,
+    socketTimeout: 30000,
+    tls: { rejectUnauthorized: false }
+});
+
+const tx587 = (EMAIL_USER && EMAIL_PASS) ? make587() : nodemailer.createTransport({ jsonTransport: true });
+const tx465 = (EMAIL_USER && EMAIL_PASS) ? make465() : nodemailer.createTransport({ jsonTransport: true });
+
+async function sendRaw(opts) {
+    const mail = { from: EMAIL_USER, ...opts }; // DMARC: from must match Gmail user
+    try {
+        return await tx587.sendMail(mail);
+    } catch (e) {
+        const msg = (e && (e.code || e.responseCode || e.message)) || '';
+        // fallback only on connection-ish failures
+        if (/timeout|socket|ECONN|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|TLS|handshake/i.test(msg)) {
+            console.warn('587 failed, retrying via 465...', msg);
+            return await tx465.sendMail(mail);
+        }
+        throw e;
+    }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function sendMailImpl(opts, tries = 3) {
+    for (let i = 1; i <= tries; i++) {
+        try { return await sendRaw(opts); }
+        catch (e) {
+            console.error(`✉️  send attempt ${i} failed:`, e.code || e.responseCode || e.message || e);
+            if (i === tries) throw e;
+            await sleep(2000 * i); // 2s, 4s
+        }
+    }
 }
 
 async function safeSendMail(opts) {
-    try {
-        await sendMailImpl(opts);
-    } catch (err) {
+    try { await sendMailImpl(opts); }
+    catch (err) {
         const detail = err?.response?.body || err?.message || String(err);
         console.error('✉️  Mail send failed:', detail);
     }
@@ -385,7 +393,7 @@ const TEMPLATES = [
             JobType: { page: 3, x: 182, y: 400, size: 10, origin: 'top-left' },
 
             businessType: { page: 2, x: 171, y: 150, size: 10, origin: 'top-left' },
-            address: { page: 2, x: 171, y: 130, size: 10, origin: 'top-left' },
+            address: { page: 2, x: 2, y: 130, size: 10, origin: 'top-left' },
             city: { page: 2, x: 171, y: 110, size: 10, origin: 'top-left' },
             state: { page: 2, x: 171, y: 90, size: 10, origin: 'top-left' },
             postalCode: { page: 2, x: 405, y: 90, size: 10, origin: 'top-left' },
@@ -726,7 +734,7 @@ app.post('/api/new-client-login', async (req, res) => {
         await new Client({ businessName, email, phone }).save();
 
         await safeSendMail({
-            to: process.env.AGREEMENTS_INBOX || process.env.EMAIL_USER,
+            to: process.env.AGREEMENTS_INBOX || EMAIL_USER,
             subject: '🚀 New Client Logged In',
             text: `Business: ${businessName}\nEmail: ${email}\nPhone: ${phone}`,
         });
@@ -874,7 +882,7 @@ app.post('/api/submit-agreement', async (req, res) => {
     }
 });
 
-// Self-healing PDF preview
+/* Self-healing PDF preview */
 app.get('/api/sign/preview/:token', async (req, res) => {
     try {
         const decoded = jwt.verify(req.params.token, process.env.JWT_SECRET);
@@ -900,7 +908,7 @@ app.get('/api/sign/preview/:token', async (req, res) => {
     }
 });
 
-// Client signs a document
+/* Client signs a document */
 app.post('/api/sign/:token', async (req, res) => {
     const { signature, coords } = req.body;
     if (!signature) return res.status(400).json({ message: 'Missing signature' });
@@ -969,6 +977,8 @@ app.post('/api/sign/:token', async (req, res) => {
         ag.clientSignedDate = new Date();
         await ag.save();
 
+        console.log('[SIGN-CHAIN] Emailing directors:', directorEmails, 'client=', ag.businessName);
+
         for (let i = 0; i < directorEmails.length; i++) {
             const email = directorEmails[i];
             const directorLinks = ag.documents.map(
@@ -985,6 +995,9 @@ app.post('/api/sign/:token', async (req, res) => {
                 text: `Client ${ag.businessName} has completed signatures.\n\nPlease counter-sign:\n\n${directorLinks.join('\n')}`,
                 attachments
             });
+
+            // small spacing to avoid back-to-back SMTP connects with attachments
+            await sleep(1000);
         }
 
         res.status(200).json({ complete: true });
@@ -994,7 +1007,7 @@ app.post('/api/sign/:token', async (req, res) => {
     }
 });
 
-// Debug: directors
+/* Debug: directors */
 app.get('/api/debug/directors-env', (req, res) => {
     res.json({
         DIRECTOR_EMAILS: process.env.DIRECTOR_EMAILS || null,
@@ -1003,7 +1016,7 @@ app.get('/api/debug/directors-env', (req, res) => {
     });
 });
 
-// Director signs a document
+/* Director signs a document */
 app.post('/api/sign-director/:token', async (req, res) => {
     const { signature, coords } = req.body;
     if (!signature) return res.status(400).json({ message: 'Missing signature' });
@@ -1111,21 +1124,21 @@ app.get('/api/debug/app-env', (req, res) => {
 
 app.get('/api/debug/mail-env', (req, res) => {
     res.json({
-        MAILER: process.env.SENDGRID_API_KEY ? 'sendgrid' : (process.env.EMAIL_USER && process.env.EMAIL_PASS ? 'gmail' : 'json'),
-        EMAIL_USER: !!process.env.EMAIL_USER,
-        EMAIL_PASS: process.env.EMAIL_PASS ? '(set)' : null,
-        SENDGRID_API_KEY: process.env.SENDGRID_API_KEY ? '(set)' : null,
-        MAIL_FROM: process.env.MAIL_FROM || null
+        MAILER: 'gmail',
+        EMAIL_USER: !!EMAIL_USER,
+        EMAIL_PASS: EMAIL_PASS ? '(set)' : null,
+        SENDGRID_API_KEY: null,
+        MAIL_FROM: EMAIL_USER || null
     });
 });
 
 app.post('/api/debug/mail-test', async (req, res) => {
-    const to = req.body.to || process.env.AGREEMENTS_INBOX || process.env.EMAIL_USER;
+    const to = req.body?.to || req.query?.to || process.env.AGREEMENTS_INBOX || EMAIL_USER;
     try {
         await safeSendMail({
             to,
             subject: 'Mail test from backend',
-            text: 'If you see this, your mail transport works.'
+            text: 'If you see this, your Gmail transport works.'
         });
         res.json({ ok: true, to });
     } catch (e) {
@@ -1139,7 +1152,7 @@ app.get('/api/health', async (req, res) => {
         node_env: process.env.NODE_ENV,
         mongo_uri: !!process.env.MONGO_URI,
         jwt_secret: !!process.env.JWT_SECRET,
-        mailer: process.env.SENDGRID_API_KEY ? 'sendgrid' : (process.env.EMAIL_USER && process.env.EMAIL_PASS ? 'gmail' : 'json'),
+        mailer: 'gmail',
         templates: listTemplatesStatus()
     };
     try { await mongoose.connection.db.admin().ping(); checks.mongo = 'ok'; }
